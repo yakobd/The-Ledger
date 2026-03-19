@@ -11,9 +11,10 @@ COMPLETION CHECKLIST (implement in order):
 from __future__ import annotations
 import json
 from datetime import datetime
-from typing import AsyncGenerator
+from typing import AsyncGenerator, AsyncIterator
 from uuid import UUID
 import asyncpg
+from ledger.schema.events import BaseEvent, StoredEvent
 
 
 class OptimisticConcurrencyError(Exception):
@@ -62,15 +63,14 @@ class EventStore:
     async def append(
         self,
         stream_id: str,
-        events: list[dict],
-        expected_version: int,    # -1=new stream, 0+=exact version required
+        events: list[BaseEvent],
+        expected_version: int,
         causation_id: str | None = None,
         metadata: dict | None = None,
     ) -> list[int]:
         """
         Atomically appends events to stream_id with OCC.
-        Raises OptimisticConcurrencyError if version mismatch.
-        Writes to outbox in the same transaction.
+        Writes to outbox in the same transaction (Phase 1 requirement).
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -81,7 +81,7 @@ class EventStore:
                 )
                 current = row["current_version"] if row else -1
 
-                # 2. Optimistic Concurrency Check
+                # 2. OCC check
                 if current != expected_version:
                     raise OptimisticConcurrencyError(stream_id, expected_version, current)
 
@@ -129,6 +129,18 @@ class EventStore:
                     stream_id
                 )
 
+                # 6. Write to outbox (Phase 1 requirement — same transaction)
+                for pos in positions:
+                    await conn.execute(
+                        """
+                        INSERT INTO outbox (event_id, destination, payload)
+                        SELECT event_id, 'projection', payload
+                        FROM events
+                        WHERE stream_id = $1 AND stream_position = $2
+                        """,
+                        stream_id, pos
+                    )
+
                 return positions
 
     #Phase-1 Step-3: Updated the load_stream() method that was given on the starter code
@@ -137,7 +149,7 @@ class EventStore:
         stream_id: str,
         from_position: int = 0,
         to_position: int | None = None,
-    ) -> list[dict]:
+    ) -> list[StoredEvent]:
         """
         Loads events from a stream in stream_position order.
         Applies upcasters if registry is provided.
@@ -161,16 +173,16 @@ class EventStore:
 
             events = []
             for row in rows:
-                event = {
-                    "event_id": row["event_id"],
-                    "stream_id": row["stream_id"],
-                    "stream_position": row["stream_position"],
-                    "event_type": row["event_type"],
-                    "event_version": row["event_version"],
-                    "payload": json.loads(json.dumps(row["payload"])) if row["payload"] is not None else {},
-                    "metadata": json.loads(json.dumps(row["metadata"])) if row["metadata"] is not None else {},
-                    "recorded_at": row["recorded_at"],
-                }
+                event = StoredEvent(
+                    event_id=row["event_id"],
+                    stream_id=row["stream_id"],
+                    stream_position=row["stream_position"],
+                    event_type=row["event_type"],
+                    event_version=row["event_version"],
+                    payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else (dict(row["payload"]) if row["payload"] is not None else {}),
+                    metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (dict(row["metadata"]) if row["metadata"] is not None else {}),
+                    recorded_at=row["recorded_at"],
+                )
                 if self.upcasters:
                     event = self.upcasters.upcast(event)
                 events.append(event)
@@ -181,50 +193,64 @@ class EventStore:
     async def load_all(
         self,
         from_global_position: int = 0,
+        event_types: list[str] | None = None,
         batch_size: int = 500,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> AsyncIterator[StoredEvent]:
         """
         Async generator yielding events in global_position order.
-        Used by ProjectionDaemon for replay.
         """
         async with self._pool.acquire() as conn:
             pos = from_global_position
             while True:
-                rows = await conn.fetch(
-                    """
-                    SELECT event_id, stream_id, stream_position, event_type,
-                           event_version, payload, metadata, recorded_at,
-                           global_position
-                    FROM events 
-                    WHERE global_position > $1
-                    ORDER BY global_position ASC 
-                    LIMIT $2
-                    """,
-                    pos, batch_size
-                )
+                if event_types is None:
+                    rows = await conn.fetch(
+                        """
+                        SELECT event_id, stream_id, stream_position, event_type,
+                               event_version, payload, metadata, recorded_at,
+                               global_position
+                        FROM events 
+                        WHERE global_position > $1
+                        ORDER BY global_position ASC 
+                        LIMIT $2
+                        """,
+                        pos, batch_size
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """
+                        SELECT event_id, stream_id, stream_position, event_type,
+                               event_version, payload, metadata, recorded_at,
+                               global_position
+                        FROM events 
+                        WHERE global_position > $1 AND event_type = ANY($2::text[])
+                        ORDER BY global_position ASC 
+                        LIMIT $3
+                        """,
+                        pos, event_types, batch_size
+                    )
                 if not rows:
                     break
                 for row in rows:
-                    event = {
-                        "event_id": row["event_id"],
-                        "stream_id": row["stream_id"],
-                        "stream_position": row["stream_position"],
-                        "event_type": row["event_type"],
-                        "event_version": row["event_version"],
-                        "payload": json.loads(json.dumps(row["payload"])) if row["payload"] is not None else {},
-                        "metadata": json.loads(json.dumps(row["metadata"])) if row["metadata"] is not None else {},
-                        "recorded_at": row["recorded_at"],
-                        "global_position": row["global_position"],
-                    }
+                    event = StoredEvent(
+                        event_id=row["event_id"],
+                        stream_id=row["stream_id"],
+                        stream_position=row["stream_position"],
+                        event_type=row["event_type"],
+                        event_version=row["event_version"],
+                        payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else (dict(row["payload"]) if row["payload"] is not None else {}),
+                        metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (dict(row["metadata"]) if row["metadata"] is not None else {}),
+                        recorded_at=row["recorded_at"],
+                        global_position=row["global_position"],
+                    )
                     if self.upcasters:
                         event = self.upcasters.upcast(event)
                     yield event
                 if len(rows) < batch_size:
                     break
                 pos = rows[-1]["global_position"]
-    
-    #Phase-1 Step-5: Updated the get_event() method that was given on the starter code
-    async def get_event(self, event_id: UUID) -> dict | None:
+        
+    #Phase-1 Step-5.1: Updated the get_event() method that was given on the starter code
+    async def get_event(self, event_id: UUID) -> StoredEvent | None:
         """
         Loads one event by UUID. Used for causation chain lookups.
         """
@@ -240,21 +266,21 @@ class EventStore:
             )
             if not row:
                 return None
-            event = {
-                "event_id": row["event_id"],
-                "stream_id": row["stream_id"],
-                "stream_position": row["stream_position"],
-                "event_type": row["event_type"],
-                "event_version": row["event_version"],
-                "payload": json.loads(json.dumps(row["payload"])) if row["payload"] is not None else {},
-                "metadata": json.loads(json.dumps(row["metadata"])) if row["metadata"] is not None else {},
-                "recorded_at": row["recorded_at"],
-            }
+            event = StoredEvent(
+                event_id=row["event_id"],
+                stream_id=row["stream_id"],
+                stream_position=row["stream_position"],
+                event_type=row["event_type"],
+                event_version=row["event_version"],
+                payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else (dict(row["payload"]) if row["payload"] is not None else {}),
+                metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (dict(row["metadata"]) if row["metadata"] is not None else {}),
+                recorded_at=row["recorded_at"],
+            )
             if self.upcasters:
                 event = self.upcasters.upcast(event)
             return event
 
-    #Phase-1 Step-5: Created the archive_stream() method that wasn't given on the starter code
+    #Phase-1 Step-5.2: Created the archive_stream() method that wasn't given on the starter code
     async def archive_stream(self, stream_id: str) -> None:
         """
         Marks a stream as archived (Phase 4+).
@@ -265,7 +291,7 @@ class EventStore:
                 stream_id
             )
 
-    #Phase-1 Step-5: Created the get_stream_metadata() method that wasn't given on the starter code
+    #Phase-1 Step-5.3: Created the get_stream_metadata() method that wasn't given on the starter code
     async def get_stream_metadata(self, stream_id: str) -> dict:
         """
         Returns metadata for a stream (used by projections and MCP).

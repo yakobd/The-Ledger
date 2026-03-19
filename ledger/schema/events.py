@@ -22,6 +22,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 import json
+from datetime import datetime
+from uuid import UUID
+from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 
@@ -714,3 +717,17 @@ def deserialize_event(event_type: str, payload: dict) -> BaseEvent:
     if not cls:
         raise ValueError(f"Unknown event_type: {event_type!r}")
     return cls(event_type=event_type, **payload)
+
+
+
+class StoredEvent(BaseModel):
+    """Stored representation of an event (used in load_stream, load_all, get_event)."""
+    event_id: UUID
+    stream_id: str
+    stream_position: int
+    event_type: str
+    event_version: int
+    payload: Dict[str, Any]
+    metadata: Dict[str, Any]
+    recorded_at: datetime
+    global_position: Optional[int] = None
