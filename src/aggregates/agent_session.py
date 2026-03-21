@@ -1,8 +1,8 @@
 #Phase-2 Step-2: Implement AgentSessionAggregate (Gas Town Memory)
 
 from typing import List
-from ledger.event_store import EventStore
-from ledger.schema.events import StoredEvent
+from src.event_store import EventStore
+from src.models.events import StoredEvent
 
 class AgentSessionAggregate:
     def __init__(self, agent_id: str, session_id: str):

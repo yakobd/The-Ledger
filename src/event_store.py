@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import AsyncGenerator, AsyncIterator
 from uuid import UUID
 import asyncpg
-from ledger.schema.events import BaseEvent, StoredEvent
+from src.models.events import BaseEvent, StoredEvent
 
 
 class OptimisticConcurrencyError(Exception):

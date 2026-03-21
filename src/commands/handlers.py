@@ -1,6 +1,6 @@
-from ledger.event_store import EventStore
-from ledger.aggregates.loan_application import LoanApplicationAggregate
-from ledger.aggregates.agent_session import AgentSessionAggregate
+from src.event_store import EventStore
+from src.aggregates.loan_application import LoanApplicationAggregate
+from src.aggregates.agent_session import AgentSessionAggregate
 
 class CreditAnalysisCompletedCommand:
     def __init__(self, application_id: str, agent_id: str, session_id: str,

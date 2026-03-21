@@ -22,6 +22,8 @@ Chosen boundaries (7 aggregates: `loan-*`, `docpkg-*`, `agent-*`, `credit-*`, `f
 
 ## 3. Concurrency in practice
 
+Two AI agents read version 3 and call append(..., expected_version=3). The database enforces this with a UNIQUE constraint on (stream_id, stream_position) combined with an atomic UPDATE that checks the current version before writing. Exactly one succeeds (stream_position becomes 4). The losing agent receives OptimisticConcurrencyError, reloads the stream, re-evaluates whether its analysis is still relevant, and either retries or discards the decision. This is proven in the double-decision test.
+
 Sequence in `ledger/event_store.py`:
 
 1. Both agents call `load_stream("loan-XXXX")` → both see version = 3.
@@ -34,6 +36,8 @@ Sequence in `ledger/event_store.py`:
 This is exactly what the Double-Decision Test in `tests/test_event_store.py` validates.
 
 ## 4. Projection lag and its consequences
+
+Projections are eventually consistent with a typical lag of < 500 ms. This is an accepted tradeoff for high throughput in the Apex loan-processing scenario. If a loan officer queries immediately after a decision, they may see stale data. The system shows a “processing…” badge and, for critical fields (e.g. final approval status), falls back to a direct strong-consistency query against the EventStore using global_position. Projections are always rebuildable from the event store.
 
 The `LoanApplication` projection (built by `ProjectionDaemon`) is eventually consistent. If lag = 200 ms and a loan officer queries immediately after `CreditAnalysisCompleted`, they may see the old credit limit.
 
@@ -52,8 +56,8 @@ This is communicated clearly in the MCP Resource responses.
 def upcast_credit_decision_v1_to_v2(payload: dict) -> dict:
     return {
         **payload,
-        "model_version": "legacy-2024",                    # inferred from recorded_at
-        "confidence_score": None,                          # genuinely unknown
+        "model_version": infer_model_version(payload.get("recorded_at")),  # e.g. from recorded_at against deployment timeline
+        "confidence_score": None,          # never fabricate
         "regulatory_basis": infer_from_rule_versions(payload.get("reason", ""))
     }
 ```
@@ -62,11 +66,55 @@ Inference strategy: For fields that did not exist in 2024 (confidence_score), we
 
 ## 6. The Marten Async Daemon parallel
 
-In Marten, the Async Daemon runs on multiple nodes with distributed checkpointing.
 In Python (ledger/projections/daemon.py):
 
-Use Redis (or PostgreSQL advisory locks) as the coordination primitive for “projection leader” election.
-One node becomes leader and processes batches; others poll the projection_checkpoints table.
-Failure mode guarded: split-brain (two nodes processing same batch) → prevented by atomic UPDATE on last_position with version check.
+Use PostgreSQL advisory locks (or Redis) for leader election.
+One node processes batches; others poll projection_checkpoints.
+The main failure mode guarded against is split-brain / duplicate processing (two nodes processing the same batch and corrupting metrics).
+Recovery path: atomic UPDATE on last_position with version check. If the leader node fails, the next node automatically wins the lock and resumes from the last checkpoint with no data loss or duplication.
 
-This matches the fault-tolerant daemon requirement and the lag SLO contract.
+```mermaid
+graph TD
+    subgraph "AI Layer"
+        A["Agents & Command Handlers"]
+    end
+
+    subgraph "Event Store Core"
+        B["EventStore<br/>append() + outbox<br/>(same transaction)"]
+        C["events table<br/>stream_id = 'loan-xxx' or 'agent-xxx'"]
+        D["event_streams table<br/>current_version"]
+        E["outbox table<br/>guaranteed delivery"]
+    end
+
+    subgraph "Domain Aggregates"
+        F["LoanApplicationAggregate<br/>stream: loan-xxx"]
+        G["AgentSessionAggregate<br/>stream: agent-xxx<br/>(Gas Town pattern)"]
+    end
+
+    subgraph "Query Layer"
+        H["ProjectionDaemon"]
+        I["LoanApplicationProjection"]
+        J["AgentSessionProjection"]
+        K["AuditProjection"]
+    end
+
+    subgraph "Integration"
+        L["MCP Server<br/>port 8765"]
+    end
+
+    A -->|"append events with OCC"| B
+    B --> C
+    B --> D
+    B --> E
+
+    F -->|"load_stream + replay"| B
+    G -->|"load_stream"| B
+
+    H -->|"load_all + checkpoints"| B
+    H --> I
+    H --> J
+    H --> K
+
+    L -->|"commands"| A
+    L -->|"resources"| I & J & K
+```

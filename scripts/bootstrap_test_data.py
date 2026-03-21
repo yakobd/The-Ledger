@@ -1,5 +1,5 @@
 import asyncio
-from ledger.event_store import EventStore
+from src.event_store import EventStore
 
 async def bootstrap():
     store = EventStore('postgresql://postgres:apex@localhost/apex_ledger')

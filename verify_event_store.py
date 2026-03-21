@@ -1,5 +1,5 @@
 import asyncio
-from ledger.event_store import EventStore, OptimisticConcurrencyError
+from src.event_store import EventStore, OptimisticConcurrencyError
 
 async def verify():
     store = EventStore("postgresql://postgres:apex@localhost/apex_ledger")

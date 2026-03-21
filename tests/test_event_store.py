@@ -11,7 +11,7 @@ Run: pytest tests/test_event_store.py -v
 """
 import asyncio, pytest, sys
 from pathlib import Path; sys.path.insert(0, str(Path(__file__).parent.parent))
-from ledger.event_store import EventStore, OptimisticConcurrencyError
+from src.event_store import EventStore, OptimisticConcurrencyError
 
 DB_URL = "postgresql://localhost/apex_ledger"
 

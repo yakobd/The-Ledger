@@ -1,6 +1,6 @@
 from typing import List
-from ledger.event_store import EventStore
-from ledger.schema.events import StoredEvent
+from src.event_store import EventStore
+from src.models.events import StoredEvent
 from enum import Enum
 
 class ApplicationState(Enum):
