@@ -1,23 +1,43 @@
 import asyncio
 import pytest
+from uuid import uuid4
 from src.event_store import EventStore, OptimisticConcurrencyError
 
 @pytest.mark.asyncio
 async def test_concurrent_double_append_exactly_one_succeeds():
     store = EventStore("postgresql://postgres:apex@localhost/apex_ledger")
     await store.connect()
+
+    # Use a unique stream ID every test run → no version drift
+    stream_id = f"loan-test-{uuid4()}"
     
-    stream_id = "loan-TEST-APP-003"
-    expected_version = await store.stream_version(stream_id)
+    # Create the stream with initial event
+    await store.append(
+        stream_id=stream_id,
+        events=[{
+            "event_type": "ApplicationSubmitted",
+            "event_version": 1,
+            "payload": {"application_id": "test-app"}
+        }],
+        expected_version=-1
+    )
+    
+    current_version = await store.stream_version(stream_id)
     
     async def task(task_id: int):
         try:
             event = {
                 "event_type": "CreditAnalysisCompleted",
                 "event_version": 1,
-                "payload": {"application_id": "TEST-APP-003"}
+                "payload": {"application_id": "test-app"}
             }
-            positions = await store.append(stream_id, [event], expected_version)
+            positions = await store.append(
+                stream_id=stream_id,
+                events=[event],
+                expected_version=current_version,
+                correlation_id=f"task-{task_id}",
+                causation_id="test-run"
+            )
             print(f"✅ Task {task_id} SUCCEEDED → position {positions[0]}")
             return True
         except OptimisticConcurrencyError:
@@ -26,7 +46,7 @@ async def test_concurrent_double_append_exactly_one_succeeds():
         except Exception as e:
             print(f"❌ Task {task_id} unexpected error: {e}")
             return False
-    
+
     t1 = asyncio.create_task(task(1))
     t2 = asyncio.create_task(task(2))
     

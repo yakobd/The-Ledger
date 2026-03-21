@@ -10,7 +10,7 @@ COMPLETION CHECKLIST (implement in order):
 """
 from __future__ import annotations
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncGenerator, AsyncIterator
 from uuid import UUID
 import asyncpg
@@ -61,16 +61,18 @@ class EventStore:
 
     #Phase-1 Step-2: Updated the append() method that was given on the starter code
     async def append(
-        self,
-        stream_id: str,
-        events: list[BaseEvent],
-        expected_version: int,
-        causation_id: str | None = None,
-        metadata: dict | None = None,
-    ) -> list[int]:
+    self,
+    stream_id: str,
+    events: list[BaseEvent],
+    expected_version: int,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    metadata: dict | None = None,
+) -> list[int]:
         """
         Atomically appends events to stream_id with OCC.
         Writes to outbox in the same transaction (Phase 1 requirement).
+        correlation_id and causation_id are now properly stored in metadata.
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -96,12 +98,15 @@ class EventStore:
                         stream_id, aggregate_type
                     )
 
-                # 4. Append each event
-                positions = []
+                # 4. Build metadata with BOTH causal fields
                 meta = {**(metadata or {})}
+                if correlation_id:
+                    meta["correlation_id"] = correlation_id
                 if causation_id:
                     meta["causation_id"] = causation_id
 
+                # 5. Append each event
+                positions = []
                 for i, event in enumerate(events):
                     pos = expected_version + 1 + i
                     await conn.execute(
@@ -118,18 +123,18 @@ class EventStore:
                         event.get("event_version", 1),
                         json.dumps(event.get("payload", {})),
                         json.dumps(meta),
-                        datetime.utcnow()
+                        datetime.now(timezone.utc)
                     )
                     positions.append(pos)
 
-                # 5. Update stream version
+                # 6. Update stream version
                 await conn.execute(
                     "UPDATE event_streams SET current_version = $1 WHERE stream_id = $2",
                     expected_version + len(events),
                     stream_id
                 )
 
-                # 6. Write to outbox (Phase 1 requirement — same transaction)
+                # 7. Write to outbox (same transaction)
                 for pos in positions:
                     await conn.execute(
                         """

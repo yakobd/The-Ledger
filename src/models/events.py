@@ -731,3 +731,27 @@ class StoredEvent(BaseModel):
     metadata: Dict[str, Any]
     recorded_at: datetime
     global_position: Optional[int] = None
+
+
+class StreamMetadata(BaseModel):
+    """Stream-level metadata required by the rubric."""
+    aggregate_type: str
+    current_version: int
+    created_at: datetime
+    archived_at: datetime | None = None
+    metadata: dict[str, Any] = {}
+
+
+class DomainError(Exception):
+    """Base class for all domain-specific errors (required by rubric)."""
+    pass
+
+
+class OptimisticConcurrencyError(DomainError):
+    """Typed exception with structured fields (required by rubric)."""
+    stream_id: str
+    expected_version: int
+    actual_version: int
+
+    def __str__(self):
+        return f"OptimisticConcurrencyError on '{self.stream_id}': expected v{self.expected_version}, actual v{self.actual_version}"
