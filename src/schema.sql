@@ -41,3 +41,17 @@ CREATE TABLE outbox (
   published_at     TIMESTAMPTZ,
   attempts         SMALLINT NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS projection_checkpoints (
+    name VARCHAR(255) PRIMARY KEY,
+    last_position BIGINT NOT NULL
+);
+
+-- Read Model for Loan Summaries
+CREATE TABLE IF NOT EXISTS loan_summaries (
+    application_id VARCHAR(255) PRIMARY KEY,
+    applicant_name VARCHAR(255),
+    status VARCHAR(50) NOT NULL,
+    decision_reason TEXT,
+    last_updated_at TIMESTAMPTZ NOT NULL
+);

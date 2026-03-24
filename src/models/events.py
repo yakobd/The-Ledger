@@ -26,6 +26,100 @@ from datetime import datetime
 from uuid import UUID
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
+from typing import Callable, Type
+
+
+# ─── BASE EVENT ───────────────────────────────────────────────────────────────
+
+class BaseEvent(BaseModel):
+    event_type: str
+    event_version: int = 1
+    event_id: UUID = Field(default_factory=uuid4)
+    recorded_at: datetime | None = None
+
+    def to_payload(self) -> dict:
+        d = self.model_dump(mode='json')
+        for k in ('event_type', 'event_version', 'event_id', 'recorded_at'):
+            d.pop(k, None)
+        return d
+
+    def to_store_dict(self) -> dict:
+        return {
+            "event_type": self.event_type,
+            "event_version": self.event_version,
+            "payload": self.to_payload(),
+        }
+
+
+# =================================================================
+# == EVENT REGISTRY AND UPCASTING  ===
+# =================================================================
+
+
+class EventRegistry:
+    """
+    A central registry for event types and their upcasting functions.
+    """
+    def __init__(self):
+        self._event_map = {}
+        self._upcasters = {}
+
+    def register(self, event_class: Type[BaseEvent], event_name: str = None):
+        """
+        A decorator to register an event class.
+        
+        Usage:
+            @event_registry.register
+            class MyNewEvent(BaseEvent):
+                ...
+        """
+        name = event_name or event_class.__name__
+        self._event_map[name] = event_class
+        
+        # Return the original class, so the decorator doesn't change it
+        return event_class
+
+    def get_event_class(self, name: str) -> Type[BaseEvent] | None:
+        """Looks up an event class by its name."""
+        return self._event_map.get(name)
+
+    def register_upcaster(self, event_name: str, from_version: int, upcaster_func: Callable[[dict], dict]):
+        """
+        Registers a function to upcast an event from an old version.
+        
+        Usage:
+            @event_registry.register_upcaster("MyOldEvent", from_version=1)
+            def upcast_my_event(payload):
+                # ... return new payload
+        """
+        if (event_name, from_version) in self._upcasters:
+            raise ValueError(f"Upcaster for {event_name} v{from_version} is already registered.")
+        self._upcasters[(event_name, from_version)] = upcaster_func
+
+    def upcast(self, event_name: str, payload: dict) -> dict:
+        """
+        Fully upcasts an event payload from its original version to the latest.
+        It iteratively applies upcasters until the payload is current.
+        """
+        version = payload.get("version", 1)
+        
+        while (event_name, version) in self._upcasters:
+            upcaster = self._upcasters[(event_name, version)]
+            payload = upcaster(payload)
+            # The upcaster function is responsible for incrementing the version in the payload
+            version = payload.get("version", version + 1)
+            
+        return payload
+
+# Create a single, global instance of the registry that the whole application can use.
+event_registry = EventRegistry()
+
+# Now, you would typically register your existing events.
+# For example, if your classes are defined in this file, you would do:
+# event_registry.register(LoanApplicationSubmitted)
+# event_registry.register(LoanDecisionMade)
+# ... and so on for all your event types.
+# A cleaner way is using the decorator on the class definition itself.
 
 
 # ─── ENUMS ───────────────────────────────────────────────────────────────────
@@ -160,31 +254,10 @@ class CreditDecision(BaseModel):
     policy_overrides_applied: list[str] = Field(default_factory=list)
 
 
-# ─── BASE EVENT ───────────────────────────────────────────────────────────────
-
-class BaseEvent(BaseModel):
-    event_type: str
-    event_version: int = 1
-    event_id: UUID = Field(default_factory=uuid4)
-    recorded_at: datetime | None = None
-
-    def to_payload(self) -> dict:
-        d = self.model_dump(mode='json')
-        for k in ('event_type', 'event_version', 'event_id', 'recorded_at'):
-            d.pop(k, None)
-        return d
-
-    def to_store_dict(self) -> dict:
-        return {
-            "event_type": self.event_type,
-            "event_version": self.event_version,
-            "payload": self.to_payload(),
-        }
-
-
 # ─── AGGREGATE 1: LOAN APPLICATION ───────────────────────────────────────────
 # stream: "loan-{application_id}"
 
+@event_registry.register
 class ApplicationSubmitted(BaseEvent):
     event_type: str = "ApplicationSubmitted"
     application_id: str
@@ -198,6 +271,7 @@ class ApplicationSubmitted(BaseEvent):
     submitted_at: datetime
     application_reference: str
 
+@event_registry.register
 class DocumentUploadRequested(BaseEvent):
     event_type: str = "DocumentUploadRequested"
     application_id: str
@@ -205,6 +279,7 @@ class DocumentUploadRequested(BaseEvent):
     deadline: datetime
     requested_by: str
 
+@event_registry.register
 class DocumentUploaded(BaseEvent):
     event_type: str = "DocumentUploaded"
     application_id: str
@@ -219,6 +294,7 @@ class DocumentUploaded(BaseEvent):
     uploaded_at: datetime
     uploaded_by: str
 
+@event_registry.register
 class DocumentUploadFailed(BaseEvent):
     event_type: str = "DocumentUploadFailed"
     application_id: str
@@ -228,6 +304,7 @@ class DocumentUploadFailed(BaseEvent):
     attempted_filename: str
     attempted_at: datetime
 
+@event_registry.register
 class CreditAnalysisRequested(BaseEvent):
     event_type: str = "CreditAnalysisRequested"
     application_id: str
@@ -235,12 +312,14 @@ class CreditAnalysisRequested(BaseEvent):
     requested_by: str
     priority: str = "NORMAL"
 
+@event_registry.register
 class FraudScreeningRequested(BaseEvent):
     event_type: str = "FraudScreeningRequested"
     application_id: str
     requested_at: datetime
     triggered_by_event_id: str
 
+@event_registry.register
 class ComplianceCheckRequested(BaseEvent):
     event_type: str = "ComplianceCheckRequested"
     application_id: str
@@ -249,6 +328,7 @@ class ComplianceCheckRequested(BaseEvent):
     regulation_set_version: str
     rules_to_evaluate: list[str]
 
+@event_registry.register
 class DecisionRequested(BaseEvent):
     event_type: str = "DecisionRequested"
     application_id: str
@@ -256,6 +336,7 @@ class DecisionRequested(BaseEvent):
     all_analyses_complete: bool
     triggered_by_event_id: str
 
+@event_registry.register
 class DecisionGenerated(BaseEvent):
     event_type: str = "DecisionGenerated"
     event_version: int = 2
@@ -271,6 +352,7 @@ class DecisionGenerated(BaseEvent):
     model_versions: dict[str, str] = Field(default_factory=dict)
     generated_at: datetime
 
+@event_registry.register
 class HumanReviewRequested(BaseEvent):
     event_type: str = "HumanReviewRequested"
     application_id: str
@@ -279,6 +361,7 @@ class HumanReviewRequested(BaseEvent):
     assigned_to: str | None = None
     requested_at: datetime
 
+@event_registry.register
 class HumanReviewCompleted(BaseEvent):
     event_type: str = "HumanReviewCompleted"
     application_id: str
@@ -289,6 +372,7 @@ class HumanReviewCompleted(BaseEvent):
     override_reason: str | None = None
     reviewed_at: datetime
 
+@event_registry.register
 class ApplicationApproved(BaseEvent):
     event_type: str = "ApplicationApproved"
     application_id: str
@@ -300,6 +384,7 @@ class ApplicationApproved(BaseEvent):
     effective_date: str
     approved_at: datetime
 
+@event_registry.register
 class ApplicationDeclined(BaseEvent):
     event_type: str = "ApplicationDeclined"
     application_id: str
@@ -313,6 +398,7 @@ class ApplicationDeclined(BaseEvent):
 # ─── AGGREGATE 2: DOCUMENT PACKAGE ───────────────────────────────────────────
 # stream: "docpkg-{application_id}"
 
+@event_registry.register
 class PackageCreated(BaseEvent):
     event_type: str = "PackageCreated"
     package_id: str
@@ -320,6 +406,7 @@ class PackageCreated(BaseEvent):
     required_documents: list[DocumentType]
     created_at: datetime
 
+@event_registry.register
 class DocumentAdded(BaseEvent):
     event_type: str = "DocumentAdded"
     package_id: str
@@ -329,6 +416,7 @@ class DocumentAdded(BaseEvent):
     file_hash: str
     added_at: datetime
 
+@event_registry.register
 class DocumentFormatValidated(BaseEvent):
     event_type: str = "DocumentFormatValidated"
     package_id: str
@@ -338,6 +426,7 @@ class DocumentFormatValidated(BaseEvent):
     detected_format: str
     validated_at: datetime
 
+@event_registry.register
 class DocumentFormatRejected(BaseEvent):
     event_type: str = "DocumentFormatRejected"
     package_id: str
@@ -345,6 +434,7 @@ class DocumentFormatRejected(BaseEvent):
     rejection_reason: str
     rejected_at: datetime
 
+@event_registry.register
 class ExtractionStarted(BaseEvent):
     event_type: str = "ExtractionStarted"
     package_id: str
@@ -354,6 +444,7 @@ class ExtractionStarted(BaseEvent):
     extraction_model: str
     started_at: datetime
 
+@event_registry.register
 class ExtractionCompleted(BaseEvent):
     event_type: str = "ExtractionCompleted"
     package_id: str
@@ -365,6 +456,7 @@ class ExtractionCompleted(BaseEvent):
     processing_ms: int
     completed_at: datetime
 
+@event_registry.register
 class ExtractionFailed(BaseEvent):
     event_type: str = "ExtractionFailed"
     package_id: str
@@ -374,6 +466,7 @@ class ExtractionFailed(BaseEvent):
     partial_facts: FinancialFacts | None = None
     failed_at: datetime
 
+@event_registry.register
 class QualityAssessmentCompleted(BaseEvent):
     event_type: str = "QualityAssessmentCompleted"
     package_id: str
@@ -386,6 +479,7 @@ class QualityAssessmentCompleted(BaseEvent):
     auditor_notes: str
     assessed_at: datetime
 
+@event_registry.register
 class PackageReadyForAnalysis(BaseEvent):
     event_type: str = "PackageReadyForAnalysis"
     package_id: str
@@ -399,6 +493,7 @@ class PackageReadyForAnalysis(BaseEvent):
 # ─── AGGREGATE 3: AGENT SESSION ──────────────────────────────────────────────
 # stream: "agent-{agent_type}-{session_id}"
 
+@event_registry.register
 class AgentSessionStarted(BaseEvent):
     event_type: str = "AgentSessionStarted"
     session_id: str
@@ -411,6 +506,7 @@ class AgentSessionStarted(BaseEvent):
     context_token_count: int
     started_at: datetime
 
+@event_registry.register
 class AgentInputValidated(BaseEvent):
     event_type: str = "AgentInputValidated"
     session_id: str
@@ -420,6 +516,7 @@ class AgentInputValidated(BaseEvent):
     validation_duration_ms: int
     validated_at: datetime
 
+@event_registry.register
 class AgentInputValidationFailed(BaseEvent):
     event_type: str = "AgentInputValidationFailed"
     session_id: str
@@ -429,6 +526,7 @@ class AgentInputValidationFailed(BaseEvent):
     validation_errors: list[str]
     failed_at: datetime
 
+@event_registry.register
 class AgentNodeExecuted(BaseEvent):
     """One LangGraph node completed. Appended after EVERY node in EVERY agent."""
     event_type: str = "AgentNodeExecuted"
@@ -445,6 +543,7 @@ class AgentNodeExecuted(BaseEvent):
     duration_ms: int
     executed_at: datetime
 
+@event_registry.register
 class AgentToolCalled(BaseEvent):
     """Agent called a registry query or MCP tool."""
     event_type: str = "AgentToolCalled"
@@ -456,6 +555,7 @@ class AgentToolCalled(BaseEvent):
     tool_duration_ms: int
     called_at: datetime
 
+@event_registry.register
 class AgentOutputWritten(BaseEvent):
     """Agent appended its result events to domain aggregate streams."""
     event_type: str = "AgentOutputWritten"
@@ -466,6 +566,7 @@ class AgentOutputWritten(BaseEvent):
     output_summary: str
     written_at: datetime
 
+@event_registry.register
 class AgentSessionCompleted(BaseEvent):
     event_type: str = "AgentSessionCompleted"
     session_id: str
@@ -479,6 +580,7 @@ class AgentSessionCompleted(BaseEvent):
     next_agent_triggered: str | None = None
     completed_at: datetime
 
+@event_registry.register
 class AgentSessionFailed(BaseEvent):
     event_type: str = "AgentSessionFailed"
     session_id: str
@@ -490,6 +592,7 @@ class AgentSessionFailed(BaseEvent):
     recoverable: bool
     failed_at: datetime
 
+@event_registry.register
 class AgentSessionRecovered(BaseEvent):
     event_type: str = "AgentSessionRecovered"
     session_id: str
@@ -503,12 +606,14 @@ class AgentSessionRecovered(BaseEvent):
 # ─── AGGREGATE 4: CREDIT RECORD ──────────────────────────────────────────────
 # stream: "credit-{application_id}"
 
+@event_registry.register
 class CreditRecordOpened(BaseEvent):
     event_type: str = "CreditRecordOpened"
     application_id: str
     applicant_id: str
     opened_at: datetime
 
+@event_registry.register
 class HistoricalProfileConsumed(BaseEvent):
     event_type: str = "HistoricalProfileConsumed"
     application_id: str
@@ -520,6 +625,7 @@ class HistoricalProfileConsumed(BaseEvent):
     data_hash: str
     consumed_at: datetime
 
+@event_registry.register
 class ExtractedFactsConsumed(BaseEvent):
     event_type: str = "ExtractedFactsConsumed"
     application_id: str
@@ -529,6 +635,7 @@ class ExtractedFactsConsumed(BaseEvent):
     quality_flags_present: bool
     consumed_at: datetime
 
+@event_registry.register
 class CreditAnalysisCompleted(BaseEvent):
     event_type: str = "CreditAnalysisCompleted"
     event_version: int = 2
@@ -542,6 +649,7 @@ class CreditAnalysisCompleted(BaseEvent):
     regulatory_basis: list[str] = Field(default_factory=list)
     completed_at: datetime
 
+@event_registry.register
 class CreditAnalysisDeferred(BaseEvent):
     event_type: str = "CreditAnalysisDeferred"
     application_id: str
@@ -554,6 +662,7 @@ class CreditAnalysisDeferred(BaseEvent):
 # ─── AGGREGATE 5: COMPLIANCE RECORD ──────────────────────────────────────────
 # stream: "compliance-{application_id}"
 
+@event_registry.register
 class ComplianceCheckInitiated(BaseEvent):
     event_type: str = "ComplianceCheckInitiated"
     application_id: str
@@ -562,6 +671,7 @@ class ComplianceCheckInitiated(BaseEvent):
     rules_to_evaluate: list[str]
     initiated_at: datetime
 
+@event_registry.register
 class ComplianceRulePassed(BaseEvent):
     event_type: str = "ComplianceRulePassed"
     application_id: str
@@ -573,6 +683,7 @@ class ComplianceRulePassed(BaseEvent):
     evaluation_notes: str
     evaluated_at: datetime
 
+@event_registry.register
 class ComplianceRuleFailed(BaseEvent):
     event_type: str = "ComplianceRuleFailed"
     application_id: str
@@ -587,6 +698,7 @@ class ComplianceRuleFailed(BaseEvent):
     evidence_hash: str
     evaluated_at: datetime
 
+@event_registry.register
 class ComplianceRuleNoted(BaseEvent):
     event_type: str = "ComplianceRuleNoted"
     application_id: str
@@ -597,6 +709,7 @@ class ComplianceRuleNoted(BaseEvent):
     note_text: str
     evaluated_at: datetime
 
+@event_registry.register
 class ComplianceCheckCompleted(BaseEvent):
     event_type: str = "ComplianceCheckCompleted"
     application_id: str
@@ -613,6 +726,7 @@ class ComplianceCheckCompleted(BaseEvent):
 # ─── AGGREGATE 6: FRAUD SCREENING ────────────────────────────────────────────
 # stream: "fraud-{application_id}"
 
+@event_registry.register
 class FraudScreeningInitiated(BaseEvent):
     event_type: str = "FraudScreeningInitiated"
     application_id: str
@@ -620,6 +734,7 @@ class FraudScreeningInitiated(BaseEvent):
     screening_model_version: str
     initiated_at: datetime
 
+@event_registry.register
 class FraudAnomalyDetected(BaseEvent):
     event_type: str = "FraudAnomalyDetected"
     application_id: str
@@ -627,6 +742,7 @@ class FraudAnomalyDetected(BaseEvent):
     anomaly: FraudAnomaly
     detected_at: datetime
 
+@event_registry.register
 class FraudScreeningCompleted(BaseEvent):
     event_type: str = "FraudScreeningCompleted"
     application_id: str
@@ -643,6 +759,7 @@ class FraudScreeningCompleted(BaseEvent):
 # ─── AGGREGATE 7: AUDIT LEDGER ───────────────────────────────────────────────
 # stream: "audit-{entity_id}"
 
+@event_registry.register
 class AuditIntegrityCheckRun(BaseEvent):
     event_type: str = "AuditIntegrityCheckRun"
     entity_type: str
@@ -653,71 +770,6 @@ class AuditIntegrityCheckRun(BaseEvent):
     previous_hash: str | None
     chain_valid: bool
     tamper_detected: bool
-
-
-# ─── EVENT REGISTRY ───────────────────────────────────────────────────────────
-
-EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
-    # LoanApplication
-    "ApplicationSubmitted": ApplicationSubmitted,
-    "DocumentUploadRequested": DocumentUploadRequested,
-    "DocumentUploaded": DocumentUploaded,
-    "DocumentUploadFailed": DocumentUploadFailed,
-    "CreditAnalysisRequested": CreditAnalysisRequested,
-    "FraudScreeningRequested": FraudScreeningRequested,
-    "ComplianceCheckRequested": ComplianceCheckRequested,
-    "DecisionRequested": DecisionRequested,
-    "DecisionGenerated": DecisionGenerated,
-    "HumanReviewRequested": HumanReviewRequested,
-    "HumanReviewCompleted": HumanReviewCompleted,
-    "ApplicationApproved": ApplicationApproved,
-    "ApplicationDeclined": ApplicationDeclined,
-    # DocumentPackage
-    "PackageCreated": PackageCreated,
-    "DocumentAdded": DocumentAdded,
-    "DocumentFormatValidated": DocumentFormatValidated,
-    "DocumentFormatRejected": DocumentFormatRejected,
-    "ExtractionStarted": ExtractionStarted,
-    "ExtractionCompleted": ExtractionCompleted,
-    "ExtractionFailed": ExtractionFailed,
-    "QualityAssessmentCompleted": QualityAssessmentCompleted,
-    "PackageReadyForAnalysis": PackageReadyForAnalysis,
-    # AgentSession
-    "AgentSessionStarted": AgentSessionStarted,
-    "AgentInputValidated": AgentInputValidated,
-    "AgentInputValidationFailed": AgentInputValidationFailed,
-    "AgentNodeExecuted": AgentNodeExecuted,
-    "AgentToolCalled": AgentToolCalled,
-    "AgentOutputWritten": AgentOutputWritten,
-    "AgentSessionCompleted": AgentSessionCompleted,
-    "AgentSessionFailed": AgentSessionFailed,
-    "AgentSessionRecovered": AgentSessionRecovered,
-    # CreditRecord
-    "CreditRecordOpened": CreditRecordOpened,
-    "HistoricalProfileConsumed": HistoricalProfileConsumed,
-    "ExtractedFactsConsumed": ExtractedFactsConsumed,
-    "CreditAnalysisCompleted": CreditAnalysisCompleted,
-    "CreditAnalysisDeferred": CreditAnalysisDeferred,
-    # ComplianceRecord
-    "ComplianceCheckInitiated": ComplianceCheckInitiated,
-    "ComplianceRulePassed": ComplianceRulePassed,
-    "ComplianceRuleFailed": ComplianceRuleFailed,
-    "ComplianceRuleNoted": ComplianceRuleNoted,
-    "ComplianceCheckCompleted": ComplianceCheckCompleted,
-    # FraudScreening
-    "FraudScreeningInitiated": FraudScreeningInitiated,
-    "FraudAnomalyDetected": FraudAnomalyDetected,
-    "FraudScreeningCompleted": FraudScreeningCompleted,
-    # AuditLedger
-    "AuditIntegrityCheckRun": AuditIntegrityCheckRun,
-}
-
-def deserialize_event(event_type: str, payload: dict) -> BaseEvent:
-    cls = EVENT_REGISTRY.get(event_type)
-    if not cls:
-        raise ValueError(f"Unknown event_type: {event_type!r}")
-    return cls(event_type=event_type, **payload)
-
 
 
 class StoredEvent(BaseModel):
@@ -755,3 +807,6 @@ class OptimisticConcurrencyError(DomainError):
 
     def __str__(self):
         return f"OptimisticConcurrencyError on '{self.stream_id}': expected v{self.expected_version}, actual v{self.actual_version}"
+
+
+

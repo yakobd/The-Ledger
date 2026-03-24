@@ -16,6 +16,7 @@ from datagen.pdf_generator import (generate_income_statement_pdf, generate_balan
 from datagen.excel_generator import generate_financial_excel
 from datagen.event_simulator import EventSimulator
 from datagen.schema_validator import SchemaValidator
+from dotenv import load_dotenv
 
 fake = Faker()
 
@@ -198,22 +199,38 @@ async def write_to_db(db_url: str, companies, all_events):
     finally:
         await conn.close()
 
+# In datagen/generate_all.py, replace the whole main() function with this:
+
 def main():
+    # --- START: NEW, CORRECTED SETUP ---
+    # Load .env file to get the DATABASE_URL
+    load_dotenv()
+    # Fetch the URL from the environment, this will be our default
+    default_db_url = os.environ.get("DATABASE_URL")
+    if not default_db_url:
+        # If .env is missing or empty, fall back to a password-less URL but warn the user.
+        print("[WARN] DATABASE_URL not found in .env file. Using default password-less connection.")
+        default_db_url = "postgresql://localhost/apex_ledger"
+    # --- END: NEW, CORRECTED SETUP ---
+
     p = argparse.ArgumentParser(description="Apex Financial Services Data Generator")
     p.add_argument("--applicants", type=int, default=80)
     p.add_argument("--output-dir", default="./data")
     p.add_argument("--docs-dir", default="./documents")
-    p.add_argument("--db-url", default="postgresql://localhost/apex_ledger")
+    # Use the variable we just loaded as the default for the command-line argument
+    p.add_argument("--db-url", default=default_db_url)
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--skip-db", action="store_true")
     p.add_argument("--skip-docs", action="store_true")
     p.add_argument("--validate-only", action="store_true")
     args = p.parse_args()
 
+    # The rest of the main function from here is UNCHANGED.
+    # Just ensure the code below this point is the same as your original file.
+    
     random.seed(args.random_seed); Faker.seed(args.random_seed)
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.docs_dir, exist_ok=True)
-
     print("="*60)
     print("APEX FINANCIAL SERVICES — DATA GENERATOR"); print("="*60)
 
@@ -230,9 +247,9 @@ def main():
     print(f"       Montana (REG-003): {mt.company_id if mt else 'NONE — regenerate!'}")
     with open(f"{args.output_dir}/applicant_profiles.json","w") as f:
         json.dump([{"company_id":c.company_id,"name":c.name,"industry":c.industry,
-                    "jurisdiction":c.jurisdiction,"legal_type":c.legal_type,
-                    "trajectory":c.trajectory,"risk_segment":c.risk_segment,
-                    "compliance_flags":c.compliance_flags} for c in companies], f, indent=2)
+                     "jurisdiction":c.jurisdiction,"legal_type":c.legal_type,
+                     "trajectory":c.trajectory,"risk_segment":c.risk_segment,
+                     "compliance_flags":c.compliance_flags} for c in companies], f, indent=2)
 
     # ── Step 2: Documents ──────────────────────────────────────────────────────
     if not args.skip_docs:
@@ -241,16 +258,14 @@ def main():
         for i, c in enumerate(companies):
             d = Path(args.docs_dir)/c.company_id; d.mkdir(exist_ok=True)
             y = 2024
-            # Distribute PDF variants for realism
             inc_variant = "missing_ebitda" if i%20==0 else "dense" if i%15==0 else "scanned" if i%12==0 else "clean"
             bs_variant = "scanned" if i%10==0 else "clean"
             generate_income_statement_pdf(c, y, str(d/f"income_statement_{y}.pdf"), inc_variant)
             generate_balance_sheet_pdf(c, y, str(d/f"balance_sheet_{y}.pdf"), bs_variant)
             generate_application_proposal_pdf(c, f"APEX-PROP-{c.company_id}",
-                c.financials[-1]["total_revenue"]*random.uniform(0.10,0.35),
-                random.choice(c.loan_purposes), str(d/"application_proposal.pdf"))
+                                            c.financials[-1]["total_revenue"]*random.uniform(0.10,0.35),
+                                            random.choice(c.loan_purposes), str(d/"application_proposal.pdf"))
             generate_financial_excel(c, str(d/"financial_statements.xlsx"))
-            # CSV summary
             with open(str(d/"financial_summary.csv"),"w",newline="") as f:
                 w = csv.writer(f); w.writerow(["field","value","fiscal_year","currency"])
                 for k,v in c.financials[-1].items():
@@ -271,7 +286,7 @@ def main():
                       random.choice([c for c in companies if c.jurisdiction!="MT"])
             app_id = f"APEX-{app_num:04d}"
             req = round(random.uniform(company.financials[-1]["total_revenue"]*0.08,
-                                       company.financials[-1]["total_revenue"]*0.38), -3)
+                                        company.financials[-1]["total_revenue"]*0.38), -3)
             purpose = random.choice(company.loan_purposes)
             sim = EventSimulator(company=company, application_id=app_id,
                                  requested_amount=req, loan_purpose=purpose)
@@ -286,11 +301,9 @@ def main():
     print(validator.report(all_events))
     validator.assert_valid()
     print(f"  [OK] All events validated against EVENT_REGISTRY")
-
     if args.validate_only:
         print("\n  Validation-only mode. No writes."); return
 
-    # Save JSONL
     out_file = f"{args.output_dir}/seed_events.jsonl"
     with open(out_file,"w") as f:
         for sid, ed, ts in all_events:
@@ -318,5 +331,7 @@ def main():
         print(f"    {et}: {cnt}")
     print(f"\nNext: python datagen/verify.py --db-url {args.db_url}")
 
+
 if __name__ == "__main__":
+    load_dotenv()
     main()

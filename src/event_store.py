@@ -60,138 +60,108 @@ class EventStore:
             return row["current_version"] if row else -1
 
     #Phase-1 Step-2: Updated the append() method that was given on the starter code
+    # In src/event_store.py
+
+# Replace the entire 'append' method with this one:
+
     async def append(
-    self,
-    stream_id: str,
-    events: list[BaseEvent],
-    expected_version: int,
-    correlation_id: str | None = None,
-    causation_id: str | None = None,
-    metadata: dict | None = None,
-) -> list[int]:
-        """
-        Atomically appends events to stream_id with OCC.
-        Writes to outbox in the same transaction (Phase 1 requirement).
-        correlation_id and causation_id are now properly stored in metadata.
-        """
+        self,
+        stream_id: str,
+        events: list[dict],
+        expected_version: int,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> list[int]:
+        
         async with self._pool.acquire() as conn:
+            # Start a database transaction
             async with conn.transaction():
-                # 1. Get current version (FOR UPDATE locks the row)
-                row = await conn.fetchrow(
+                # 1. Get the current version of the stream
+                current_version_record = await conn.fetchrow(
                     "SELECT current_version FROM event_streams WHERE stream_id = $1 FOR UPDATE",
                     stream_id
                 )
-                current = row["current_version"] if row else -1
+                
+                # --- THIS IS THE CORE FIX ---
+                # If the record is None, the stream doesn't exist yet. Its version is 0.
+                current_version = current_version_record['current_version'] if current_version_record else 0
 
-                # 2. OCC check
-                if current != expected_version:
-                    raise OptimisticConcurrencyError(stream_id, expected_version, current)
+                # 2. Optimistic Concurrency Check
+                if current_version != expected_version:
+                    raise OptimisticConcurrencyError(stream_id, expected_version, current_version)
 
-                # 3. Create stream if it doesn't exist
-                if row is None:
-                    aggregate_type = stream_id.split("-")[0]
-                    await conn.execute(
+                # 3. Insert the new events
+                new_version = current_version
+                new_event_ids = []
+                for event in events:
+                    new_version += 1
+                    event_id = await conn.fetchval(
                         """
-                        INSERT INTO event_streams (stream_id, aggregate_type, current_version)
-                        VALUES ($1, $2, 0)
-                        """,
-                        stream_id, aggregate_type
-                    )
-
-                # 4. Build metadata with BOTH causal fields
-                meta = {**(metadata or {})}
-                if correlation_id:
-                    meta["correlation_id"] = correlation_id
-                if causation_id:
-                    meta["causation_id"] = causation_id
-
-                # 5. Append each event
-                positions = []
-                for i, event in enumerate(events):
-                    pos = expected_version + 1 + i
-                    await conn.execute(
-                        """
-                        INSERT INTO events (
-                            stream_id, stream_position, event_type, event_version,
-                            payload, metadata, recorded_at
-                        )
-                        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
+                        INSERT INTO events (stream_id, stream_position, event_type, event_version, payload, metadata)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        RETURNING event_id
                         """,
                         stream_id,
-                        pos,
+                        new_version,
                         event["event_type"],
-                        event.get("event_version", 1),
-                        json.dumps(event.get("payload", {})),
-                        json.dumps(meta),
-                        datetime.now(timezone.utc)
+                        event["event_version"],
+                        json.dumps(event["payload"]),
+                        json.dumps({"correlation_id": correlation_id, "causation_id": causation_id}),
                     )
-                    positions.append(pos)
+                    new_event_ids.append(event_id)
 
-                # 6. Update stream version
+                # 4. Update the stream's version (UPSERT)
+                # This will create the stream record if it's the first time, or update it if it exists.
                 await conn.execute(
-                    "UPDATE event_streams SET current_version = $1 WHERE stream_id = $2",
-                    expected_version + len(events),
-                    stream_id
+                    """
+                    INSERT INTO event_streams (stream_id, aggregate_type, current_version)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (stream_id) DO UPDATE SET current_version = $3
+                    """,
+                    stream_id,
+                    stream_id.split('-')[0], # Extract aggregate type from stream_id
+                    new_version
                 )
+                
+                return new_event_ids
 
-                # 7. Write to outbox (same transaction)
-                for pos in positions:
-                    await conn.execute(
-                        """
-                        INSERT INTO outbox (event_id, destination, payload)
-                        SELECT event_id, 'projection', payload
-                        FROM events
-                        WHERE stream_id = $1 AND stream_position = $2
-                        """,
-                        stream_id, pos
-                    )
-
-                return positions
 
     #Phase-1 Step-3: Updated the load_stream() method that was given on the starter code
-    async def load_stream(
-        self,
-        stream_id: str,
-        from_position: int = 0,
-        to_position: int | None = None,
-    ) -> list[StoredEvent]:
+    async def load_stream(self, stream_id: str) -> list[StoredEvent]:
         """
-        Loads events from a stream in stream_position order.
-        Applies upcasters if registry is provided.
+        Loads all events for a given stream and returns them as a list.
         """
         async with self._pool.acquire() as conn:
-            query = """
+            rows = await conn.fetch(
+                """
                 SELECT event_id, stream_id, stream_position, event_type,
-                       event_version, payload, metadata, recorded_at
-                FROM events
-                WHERE stream_id = $1 AND stream_position >= $2
-            """
-            params = [stream_id, from_position]
-
-            if to_position is not None:
-                query += " AND stream_position <= $3"
-                params.append(to_position)
-
-            query += " ORDER BY stream_position ASC"
-
-            rows = await conn.fetch(query, *params)
-
+                    event_version, payload, metadata, recorded_at, global_position
+                FROM events 
+                WHERE stream_id = $1
+                ORDER BY stream_position ASC
+                """,
+                stream_id
+            )
+            
             events = []
             for row in rows:
+                # --- THIS IS THE FIX ---
+                # The database gives us a JSON string. We must parse it back into a dictionary.
+                payload_dict = json.loads(row["payload"]) if isinstance(row["payload"], str) else (row["payload"] or {})
+                metadata_dict = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {})
+                
                 event = StoredEvent(
                     event_id=row["event_id"],
                     stream_id=row["stream_id"],
                     stream_position=row["stream_position"],
                     event_type=row["event_type"],
                     event_version=row["event_version"],
-                    payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else (dict(row["payload"]) if row["payload"] is not None else {}),
-                    metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (dict(row["metadata"]) if row["metadata"] is not None else {}),
+                    payload=payload_dict,
+                    metadata=metadata_dict,
                     recorded_at=row["recorded_at"],
+                    global_position=row["global_position"],
                 )
-                if self.upcasters:
-                    event = self.upcasters.upcast(event)
                 events.append(event)
-
             return events
 
     #Phase-1 Step-4: Updated the load_all() method that was given on the starter code
@@ -322,6 +292,37 @@ class EventStore:
                 "metadata": dict(row["metadata"]),
             }
 
+    async def load_aggregate(self, stream_id: str, aggregate_class):
+        """Helper method to load an aggregate instance from its event stream."""
+        aggregate = aggregate_class()
+        
+        # Set the stream_id FIRST, so the aggregate knows its own identity
+        aggregate.stream_id = stream_id
+        
+        events_list = await self.load_stream(stream_id)
+            
+        # The apply_events method from BaseAggregate will loop, call apply(), and set the version.
+        aggregate.apply_events(events_list)
+        
+        return aggregate
+    
+    async def append_to_stream(self, aggregate):
+        """Helper method to save new events from an aggregate."""
+        if not aggregate.has_new_events():
+            return
+            
+        # --- THIS IS THE FIX ---
+        # The expected version for the write operation is the aggregate's version
+        # MINUS the number of new events it has.
+        # For a new aggregate, version=3, new_events=3, so expected_version=0.
+        # For an existing aggregate, version=6, new_events=2, so expected_version=4.
+        expected_version = aggregate.version - len(aggregate.new_events)
+        
+        return await self.append(
+            stream_id=aggregate.stream_id,
+            events=[event.to_store_dict() for event in aggregate.new_events],
+            expected_version=expected_version
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPCASTER REGISTRY — Phase 4

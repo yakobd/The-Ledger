@@ -1,0 +1,5 @@
+asyncpg>=0.29.0
+anthropic>=0.39.0
+langgraph>=0.2.76
+pydantic>=2.6.0
+fastmcp>=0.9.0

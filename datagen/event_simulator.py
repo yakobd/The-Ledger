@@ -37,7 +37,7 @@ class EventSimulator:
         self.t += timedelta(**kw); return self.t
 
     def _emit(self, stream_id: str, event: BaseEvent) -> None:
-        cls = EVENT_REGISTRY.get(event.event_type)
+        cls = event_registry.get_event_class(event.event_type)
         assert cls, f"Unknown event_type: {event.event_type}"
         cls(event_type=event.event_type, **event.to_payload())  # validate
         self.events.append((stream_id, event.to_store_dict(), self.t.isoformat()))
