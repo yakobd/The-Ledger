@@ -15,7 +15,7 @@ from typing import AsyncGenerator, AsyncIterator
 from uuid import UUID
 import asyncpg
 from src.models.events import BaseEvent, StoredEvent
-
+from src.models import event_registry
 
 class OptimisticConcurrencyError(Exception):
     """Raised when expected_version doesn't match current stream version."""
@@ -129,9 +129,11 @@ class EventStore:
     #Phase-1 Step-3: Updated the load_stream() method that was given on the starter code
     async def load_stream(self, stream_id: str) -> list[StoredEvent]:
         """
-        Loads all events for a given stream and returns them as a list.
+        Loads all events for a given stream, upcasting them to the latest version.
         """
         async with self._pool.acquire() as conn:
+            # --- THIS IS THE FIX ---
+            # The full, correct SQL query is here.
             rows = await conn.fetch(
                 """
                 SELECT event_id, stream_id, stream_position, event_type,
@@ -142,22 +144,33 @@ class EventStore:
                 """,
                 stream_id
             )
+            # --- END OF FIX ---
             
             events = []
             for row in rows:
-                # --- THIS IS THE FIX ---
-                # The database gives us a JSON string. We must parse it back into a dictionary.
                 payload_dict = json.loads(row["payload"]) if isinstance(row["payload"], str) else (row["payload"] or {})
-                metadata_dict = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {})
+                
+                print(f"--- DEBUG: Processing Event ---")
+                print(f"  - Event Type: {row['event_type']}")
+                print(f"  - Original DB Version: {row['event_version']}")
+                print(f"  - Original Payload: {payload_dict}")
+
+                upcasted_payload = event_registry.upcast(row["event_type"], payload_dict)
+                
+                print(f"  - Upcasted Payload: {upcasted_payload}")
+
+                # Determine the final version from the upcasted payload, falling back to the row's version
+                final_version = upcasted_payload.get("event_version", row["event_version"])
+                print(f"  - Final Version determined: {final_version}")
                 
                 event = StoredEvent(
                     event_id=row["event_id"],
                     stream_id=row["stream_id"],
                     stream_position=row["stream_position"],
                     event_type=row["event_type"],
-                    event_version=row["event_version"],
-                    payload=payload_dict,
-                    metadata=metadata_dict,
+                    event_version=final_version,
+                    payload=upcasted_payload,
+                    metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {}),
                     recorded_at=row["recorded_at"],
                     global_position=row["global_position"],
                 )

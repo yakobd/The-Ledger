@@ -10,9 +10,9 @@ from src.event_store import EventStore
 from src.models.events import StoredEvent, BaseEvent, event_registry
 from src.projections.base import BaseProjector
 from .loan_summary_projector import LoanSummaryProjector
+from .agent_performance_projector import AgentPerformanceLedgerProjector
+from .compliance_audit_projector import ComplianceAuditProjector
 
-# --- TODO: Import your actual projector classes here ---
-# from .loan_summary_projector import LoanSummaryProjector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,30 +35,42 @@ class ProjectionDaemon:
         """
         Initializes and maps all projectors to the events they handle.
         """
-        # TODO: Add your projector classes to this list
+        # This list should contain all your projector classes
         projector_classes = [
             LoanSummaryProjector,
+            AgentPerformanceLedgerProjector,
+            ComplianceAuditProjector,
         ]
         
+        # --- THIS IS THE NEW, SIMPLER LOGIC ---
+        # Clear the map to ensure a clean registration
+        self._projector_map = {}
+        
         for proj_class in projector_classes:
-            # We instantiate it here, but we'll re-instantiate with a connection later
+            # Create a temporary instance just to read its `event_types`
             temp_instance = proj_class(conn=None) 
+            
+            # For each event type this projector handles, add it to the map
             for event_type in temp_instance.event_types:
                 event_name = event_type.__name__
                 if event_name not in self._projector_map:
                     self._projector_map[event_name] = []
-                self._projector_map[event_name].append(proj_class)
-        logger.info(f"Registered projectors: {self._projector_map}")
+                
+                # Add the projector *class* to the list for this event name
+                if proj_class not in self._projector_map[event_name]:
+                    self._projector_map[event_name].append(proj_class)
+
+        logger.info(f"Registered projectors: {self._projector_map.keys()}")
 
 
     async def run_forever(self, poll_interval: int = 2):
-        """Main loop to acquire lock and process events."""
         await self.register_projectors()
         logger.info("Starting projection daemon...")
+        
         while True:
             try:
+                # We move the connection acquisition inside the try block
                 async with self.event_store._pool.acquire() as conn:
-                    # This is our chosen leader election strategy
                     is_leader = await conn.fetchval("SELECT pg_try_advisory_lock($1)", PROJECTION_LOCK_ID)
 
                     if is_leader:
@@ -66,19 +78,25 @@ class ProjectionDaemon:
                         try:
                             await self._process_batch(conn)
                         finally:
-                            # Ensure we release the lock
+                            # Ensure we release the lock even if _process_batch fails
                             await conn.execute("SELECT pg_advisory_unlock($1)", PROJECTION_LOCK_ID)
                     else:
-                        logger.debug("Could not acquire projection lock. Another instance is leader.")
-                
-                await asyncio.sleep(poll_interval)
-
+                        logger.debug("Could not acquire lock. Another instance may be leader.")
+            
             except (asyncio.CancelledError, KeyboardInterrupt):
                 logger.info("Projection daemon shutting down.")
-                break
+                break # Exit the loop cleanly
+            
             except Exception:
-                logger.exception("Error in projection daemon main loop. Retrying...")
-                await asyncio.sleep(poll_interval * 2) # Backoff on error
+                # If ANY other error occurs, log it and continue
+                logger.exception("An error occurred in the projection daemon loop. Retrying...")
+                
+            finally:
+                # --- THIS IS THE CRITICAL FIX ---
+                # This `finally` block ensures that we ALWAYS sleep before the next iteration,
+                # regardless of whether there was a success or an error.
+                logger.debug(f"Sleeping for {poll_interval} seconds...")
+                await asyncio.sleep(poll_interval)
 
     # async def _process_batch(self, conn: asyncpg.Connection):
     #     """The core logic of the daemon when it is the leader."""

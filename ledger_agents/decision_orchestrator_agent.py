@@ -2,7 +2,6 @@
 
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
-from decimal import Decimal
 import os
 import json
 import httpx
@@ -11,9 +10,18 @@ import certifi
 # --- THIS IS THE CHANGE ---
 # Use the stable and standard OpenAI library
 from openai import AsyncOpenAI
-
+from decimal import Decimal
+from datetime import date, datetime
 from src.event_store import EventStore
 from src.aggregates.loan_application import LoanApplicationAggregate as LoanApplication
+
+def json_serializer(obj):
+    """Custom JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return str(obj) # Convert Decimal to a simple string
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 # (State class is unchanged)
 class DecisionOrchestratorState(TypedDict):
@@ -72,9 +80,9 @@ class DecisionOrchestratorAgent:
         print("  -> Synthesizing inputs with an LLM via OpenRouter...")
         prompt = f"""You are a loan underwriter AI... (prompt is the same as before) ... Respond only with the requested JSON object.
         DATA:
-        <CreditAnalysis>{json.dumps(state['credit_analysis_output'])}</CreditAnalysis>
-        <FraudScreening>{json.dumps(state['fraud_screening_output'])}</FraudScreening>
-        <ComplianceCheck>{json.dumps(state['compliance_check_output'])}</ComplianceCheck>
+        <CreditAnalysis>{json.dumps(state['credit_analysis_output'], default=json_serializer)}</CreditAnalysis>
+        <FraudScreening>{json.dumps(state['fraud_screening_output'], default=json_serializer)}</FraudScreening>
+        <ComplianceCheck>{json.dumps(state['compliance_check_output'], default=json_serializer)}</ComplianceCheck>
         """
         try:
             response = await self.llm_client.chat.completions.create(

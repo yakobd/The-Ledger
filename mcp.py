@@ -63,26 +63,30 @@ async def get_application_history(application_id: str):
     """
     print(f"MCP: Received request for history of {application_id}")
     
-    # Define all the streams related to a single application
+    # Define all the stream prefixes related to a single application
     stream_prefixes = ["loan", "docpkg", "credit", "fraud", "compliance"]
     stream_ids = [f"{prefix}-{application_id}" for prefix in stream_prefixes]
     
     all_events = []
     
     try:
-        # Load events from all related streams concurrently
+        # Load events from all related streams concurrently using asyncio.gather
         tasks = [event_store.load_stream(stream_id) for stream_id in stream_ids]
-        stream_results = await asyncio.gather(*tasks)
+        stream_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Flatten the list of lists into a single list of events
-        for event_list in stream_results:
-            all_events.extend(event_list)
-            
+        for result in stream_results:
+            if isinstance(result, list):
+                all_events.extend(result)
+            elif isinstance(result, Exception):
+                # Log the error but don't crash the request
+                print(f"  -> WARNING: Could not load a stream: {result}")
+
         # Sort the unified list by global_position to get the true chronological order
-        # Pydantic models need to be converted to dicts for the response
+        # Pydantic models need to be converted to dicts for the JSON response
         sorted_events = sorted(
             [event.model_dump(mode="json") for event in all_events], 
-            key=lambda e: e.get("global_position")
+            key=lambda e: e.get("global_position") or 0 # Use 0 if global_position is None
         )
         
         print(f"  -> Found {len(sorted_events)} total events for {application_id}.")

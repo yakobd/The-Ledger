@@ -55,3 +55,35 @@ CREATE TABLE IF NOT EXISTS loan_summaries (
     decision_reason TEXT,
     last_updated_at TIMESTAMPTZ NOT NULL
 );
+
+-- Read Model for Agent Performance
+CREATE TABLE IF NOT EXISTS agent_performance_ledger (
+    agent_id VARCHAR(255) PRIMARY KEY,
+    model_version VARCHAR(255),
+    analyses_completed INT NOT NULL DEFAULT 0,
+    decisions_generated INT NOT NULL DEFAULT 0,
+    avg_confidence_score FLOAT NOT NULL DEFAULT 0.0,
+    avg_duration_ms BIGINT NOT NULL DEFAULT 0,
+    approve_rate FLOAT NOT NULL DEFAULT 0.0,
+    decline_rate FLOAT NOT NULL DEFAULT 0.0,
+    refer_rate FLOAT NOT NULL DEFAULT 0.0,
+    human_override_rate FLOAT NOT NULL DEFAULT 0.0,
+    first_seen_at TIMESTAMPTZ,
+    last_seen_at TIMESTAMPTZ
+);
+
+
+-- Read Model for Compliance Audit View (Temporal)
+CREATE TABLE IF NOT EXISTS compliance_audit_view (
+    id SERIAL PRIMARY KEY,
+    application_id VARCHAR(255) NOT NULL,
+    version INT NOT NULL,
+    overall_verdict VARCHAR(50) NOT NULL,
+    has_hard_block BOOLEAN NOT NULL,
+    rules_passed INT NOT NULL,
+    rules_failed INT NOT NULL,
+    failed_rules_details JSONB, -- Store details of failed rules as JSON
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE(application_id, version)
+);
+CREATE INDEX idx_compliance_audit_app_id ON compliance_audit_view (application_id);

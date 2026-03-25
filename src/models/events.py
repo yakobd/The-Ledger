@@ -62,55 +62,68 @@ class EventRegistry:
     """
     def __init__(self):
         self._event_map = {}
+        # The key is now a tuple: (event_type_name, from_version)
         self._upcasters = {}
 
     def register(self, event_class: Type[BaseEvent], event_name: str = None):
-        """
-        A decorator to register an event class.
-        
-        Usage:
-            @event_registry.register
-            class MyNewEvent(BaseEvent):
-                ...
-        """
+        """Decorator to register an event class."""
         name = event_name or event_class.__name__
         self._event_map[name] = event_class
-        
-        # Return the original class, so the decorator doesn't change it
         return event_class
 
     def get_event_class(self, name: str) -> Type[BaseEvent] | None:
-        """Looks up an event class by its name."""
         return self._event_map.get(name)
 
-    def register_upcaster(self, event_name: str, from_version: int, upcaster_func: Callable[[dict], dict]):
+    # This is the decorator for registering upcaster functions
+    def register_upcaster(self, event_name: str, from_version: int):
         """
-        Registers a function to upcast an event from an old version.
+        A decorator to register an upcaster function for a specific event type and version.
         
-        Usage:
-            @event_registry.register_upcaster("MyOldEvent", from_version=1)
-            def upcast_my_event(payload):
-                # ... return new payload
+        @event_registry.register_upcaster("MyEvent", from_version=1)
+        def upcast_my_event_v1_to_v2(payload: dict) -> dict:
+            # ... transform and return the new payload
         """
-        if (event_name, from_version) in self._upcasters:
-            raise ValueError(f"Upcaster for {event_name} v{from_version} is already registered.")
-        self._upcasters[(event_name, from_version)] = upcaster_func
+        def decorator(func: Callable[[dict], dict]) -> Callable:
+            if (event_name, from_version) in self._upcasters:
+                raise ValueError(f"Upcaster for {event_name} v{from_version} is already registered.")
+            self._upcasters[(event_name, from_version)] = func
+            return func
+        return decorator
 
-    def upcast(self, event_name: str, payload: dict) -> dict:
+    def upcast(self, event_type: str, event_payload: dict) -> dict:
         """
         Fully upcasts an event payload from its original version to the latest.
-        It iteratively applies upcasters until the payload is current.
         """
-        version = payload.get("version", 1)
+        # Make a copy to avoid modifying the original dict in place
+        current_payload = event_payload.copy()
+        version = current_payload.get("event_version", 1)
         
-        while (event_name, version) in self._upcasters:
-            upcaster = self._upcasters[(event_name, version)]
-            payload = upcaster(payload)
-            # The upcaster function is responsible for incrementing the version in the payload
-            version = payload.get("version", version + 1)
+        print(f"--- DEBUG (Upcast): Starting upcast for {event_type} v{version} ---")
+        print(f"  - Available upcasters: {list(self._upcasters.keys())}")
+        
+        # Keep looping as long as an upgrader for the current version exists
+        while (event_type, version) in self._upcasters:
+            print(f"  -> Found upcaster for {event_type} v{version}. Applying now.")
+            upcaster_func = self._upcasters[(event_type, version)]
             
-        return payload
+            # Apply the upcaster
+            current_payload = upcaster_func(current_payload)
+            
+            # The upcaster is responsible for incrementing the version within the payload
+            new_version = current_payload.get("event_version", version)
+            
+            if new_version == version:
+                # If the version didn't change, break to prevent an infinite loop
+                print("  -> WARNING: Upcaster did not increment event_version. Breaking loop.")
+                break
+                
+            version = new_version
+            print(f"  -> Payload is now at v{version}.")
 
+        print(f"--- DEBUG (Upcast): Finished upcast for {event_type}. Final version is v{version}. ---")
+        return current_payload
+
+# The global instance remains the same
 # Create a single, global instance of the registry that the whole application can use.
 event_registry = EventRegistry()
 
@@ -810,3 +823,15 @@ class OptimisticConcurrencyError(DomainError):
 
 
 
+@event_registry.register_upcaster("CreditAnalysisCompleted", from_version=1)
+def upcast_credit_analysis_v1_to_v2(payload: dict) -> dict:
+    """
+    Upcasts a V1 CreditAnalysisCompleted event to V2.
+    """
+    print(f"DEBUG: Upcasting CreditAnalysisCompleted event from v1 to v2...")
+    new_payload = payload.copy()
+    new_payload["model_version"] = "legacy-rules-engine-2025"
+    new_payload["confidence_score"] = None
+    new_payload["regulatory_basis"] = []
+    new_payload["event_version"] = 2
+    return new_payload
