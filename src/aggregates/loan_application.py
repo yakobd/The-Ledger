@@ -93,3 +93,44 @@ class LoanApplicationAggregate:
 
     def _on_ApplicationDeclined(self, event: StoredEvent):
         self.state = ApplicationState.DECLINED
+
+    # In src/aggregates/loan_application.py
+
+    # Add these two methods to the BOTTOM of your existing LoanApplicationAggregate class
+
+    # --- Command Methods ---
+    def approve_application(self, approved_amount: "Decimal", interest_rate: float, term: int, approved_by: str):
+        # You can add your own guard clauses here if you wish, e.g.
+        # self.assert_can_be_approved() 
+        
+        # We need to import the specific event class to create it
+        from src.models.events import ApplicationApproved
+        
+        # Note: We are NOT calling self.record() from my previous examples.
+        # Your design seems to handle event creation outside the aggregate.
+        # For now, we will just create and return the event object.
+        return ApplicationApproved(
+            application_id=self.application_id,
+            approved_amount_usd=approved_amount,
+            interest_rate_pct=interest_rate,
+            term_months=term,
+            conditions=[],
+            approved_by=approved_by,
+            effective_date=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat(),
+            approved_at=__import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        )
+
+    def decline_application(self, reasons: list[str], declined_by: str):
+        # self.assert_can_be_approved() # Optional guard clause
+        
+        from src.models.events import ApplicationDeclined
+        
+        return ApplicationDeclined(
+            application_id=self.application_id,
+            decline_reasons=reasons,
+            declined_by=declined_by,
+            adverse_action_notice_required=True,
+            adverse_action_codes=[],
+            declined_at=__import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        )
+
