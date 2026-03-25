@@ -9,9 +9,9 @@ import asyncpg
 from src.event_store import EventStore
 from src.models.events import StoredEvent, BaseEvent, event_registry
 from src.projections.base import BaseProjector
-from .loan_summary_projector import LoanSummaryProjector
-from .agent_performance_projector import AgentPerformanceLedgerProjector
-from .compliance_audit_projector import ComplianceAuditProjector
+from .application_summary import LoanSummaryProjector
+from .agent_performance import AgentPerformanceLedgerProjector
+from .compliance_audit import ComplianceAuditProjector
 
 
 logging.basicConfig(level=logging.INFO)
@@ -138,8 +138,14 @@ class ProjectionDaemon:
         """The core logic of the daemon when it is the leader."""
         last_processed_position = await self._get_last_checkpoint(conn)
         
-        # This call is now working!
-        events = [event async for event in self.event_store.load_all(from_global_position=last_processed_position, batch_size=100)]
+        # --- THIS IS THE FIX ---
+        # We create an empty list to hold the events from the generator
+        events = []
+        # We correctly call your `load_all` with the right parameter name
+        # and loop over the async iterator it returns.
+        async for event in self.event_store.load_all(from_global_position=last_processed_position, batch_size=100):
+            events.append(event)
+        # --- END OF FIX ---
 
         if not events:
             logger.debug("No new events to project.")
@@ -148,26 +154,23 @@ class ProjectionDaemon:
         logger.info(f"Projecting {len(events)} new events...")
 
         for stored_event in events:
-            # --- THE FIX IS HERE ---
+            # The rest of the method is unchanged and correct...
             projector_classes = self._projector_map.get(stored_event.event_type, [])
-            if not projector_classes:
-                continue
+            if not projector_classes: continue
+            try:
+                # Your upcasting logic is now inside load_all, so we don't need it here.
+                # We just need to create the typed model.
+                typed_event = event_registry.get_event_class(stored_event.event_type)(**stored_event.payload)
+                for proj_class in projector_classes:
+                    async with conn.transaction():
+                        projector_instance = proj_class(conn)
+                        await projector_instance.handle(typed_event)
+            except Exception as e:
+                logger.error(f"Failed to process event {stored_event.global_position}: {e}")
 
-            # --- AND HERE ---
-            event_payload = event_registry.upcast(stored_event.event_type, stored_event.payload)
-            # --- AND HERE ---
-            event_model = event_registry.get_event_class(stored_event.event_type)(**event_payload)
-
-            for proj_class in projector_classes:
-                async with conn.transaction():
-                    projector_instance = proj_class(conn)
-                    await projector_instance.handle(event_model)
-        
         latest_position = events[-1].global_position
         await self._update_checkpoint(conn, latest_position)
         logger.info(f"Projection checkpoint updated to global_position={latest_position}")
-
-
 
     async def _get_last_checkpoint(self, conn: asyncpg.Connection) -> int:
         """

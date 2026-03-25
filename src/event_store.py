@@ -8,6 +8,7 @@ COMPLETION CHECKLIST (implement in order):
   [ ] Phase 1, Day 2: get_event() (needed for causation chain)
   [ ] Phase 4:        UpcasterRegistry.upcast() integration in load_stream/load_all
 """
+
 from __future__ import annotations
 import json
 from datetime import datetime, timezone
@@ -15,8 +16,8 @@ from typing import AsyncGenerator, AsyncIterator
 from uuid import UUID
 import asyncpg
 from src.models.events import BaseEvent, StoredEvent
-from src.models import event_registry
-
+from src.upcasting.registry import event_registry
+import src.upcasting.upcasters
 class OptimisticConcurrencyError(Exception):
     """Raised when expected_version doesn't match current stream version."""
     def __init__(self, stream_id: str, expected: int, actual: int):

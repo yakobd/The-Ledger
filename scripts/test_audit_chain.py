@@ -8,7 +8,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 from src.event_store import EventStore
-from src.audit import run_integrity_check
+from src.integrity.audit_chain import run_integrity_check
 from src.models.events import ApplicationSubmitted, ApplicationApproved
 
 # --- Test Config ---

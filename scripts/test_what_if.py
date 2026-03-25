@@ -8,7 +8,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 from src.event_store import EventStore
-from src.what_if import run_what_if_simulation
+from src.what_if.projector import run_what_if_simulation
 from src.models.events import CreditAnalysisCompleted
 
 # --- Test Config ---

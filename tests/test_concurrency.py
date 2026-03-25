@@ -16,7 +16,7 @@ async def test_concurrent_double_append_exactly_one_succeeds():
         stream_id=stream_id,
         events=[{
             "event_type": "ApplicationSubmitted",
-            "event_version": 1,
+            "event_version": 0,
             "payload": {"application_id": "test-app"}
         }],
         expected_version=-1

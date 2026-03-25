@@ -1,4 +1,4 @@
-# src/audit.py
+# src/audit_chain.py
 
 import hashlib
 import json

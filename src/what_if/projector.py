@@ -8,7 +8,7 @@ import asyncpg # We need to import this for the type hint
 from src.event_store import EventStore
 from src.models.events import StoredEvent, BaseEvent, event_registry
 # Import all the projectors we want to run in our simulation
-from src.projections.loan_summary_projector import LoanSummaryProjector
+from projections.application_summary import LoanSummaryProjector
 
 # Import all the agents to run the simulation
 from ledger_agents.document_processing_agent import DocumentProcessingAgent

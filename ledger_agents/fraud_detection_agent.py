@@ -3,12 +3,16 @@
 from typing import TypedDict, Annotated
 import operator
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from langgraph.graph import StateGraph, END
 from decimal import Decimal
 
 from src.event_store import EventStore
 from src.aggregates.fraud_screening import FraudScreening
+from src.aggregates.agent_session import AgentSessionAggregate
+from src.commands.models import RecordFraudScreening, StartAgentSession
+from src.commands.handlers import handle_record_fraud_screening, handle_start_agent_session
 
 class FraudDetectionAgentState(TypedDict):
     application_id: str
@@ -21,6 +25,7 @@ class FraudDetectionAgent:
     def __init__(self, event_store: EventStore):
         self.event_store = event_store
         self.workflow = self._build_graph()
+        self.session_id = str(uuid.uuid4())
 
     def _build_graph(self):
         workflow = StateGraph(FraudDetectionAgentState)
@@ -41,9 +46,31 @@ class FraudDetectionAgent:
 
     # --- Agent Nodes ---
 
-    def _node_start_screening(self, state: FraudDetectionAgentState):
-        print(f"AGENT: Starting fraud screening for application {state['application_id']}")
+    async def _node_start_screening(self, state: FraudDetectionAgentState):
+        """
+        This node now uses the Command Handler pattern to start its session.
+        """
+        app_id = state['application_id']
+        print(f"AGENT: Starting fraud screening for application {app_id}")
+        print(f"  -> Session ID: {self.session_id}")
+
+        # 1. Create the Command object
+        command = StartAgentSession(
+            session_id=self.session_id,
+            agent_type="fraud_detection",
+            application_id=app_id,
+            model_version="rule_based_v1"
+        )
+
+        # 2. Dispatch the command to the handler
+        try:
+            await handle_start_agent_session(command, self.event_store)
+            print("  -> Gas Town: AgentSessionStarted event handled successfully.")
+        except Exception as e:
+            print(f"  -> ERROR could not start agent session: {e}")
+            
         return {"anomalies": []}
+
 
     def _node_check_profitability_ratios(self, state: FraudDetectionAgentState):
         """Rule: Check if net margin is unusually high."""
@@ -107,44 +134,25 @@ class FraudDetectionAgent:
         return {"final_score": final_score}
 
     async def _node_finish_screening(self, state: FraudDetectionAgentState):
-        """Save the results to the event store."""
         app_id = state["application_id"]
         print(f"AGENT: Finishing fraud screening for {app_id}")
         
-        stream_id = f"fraud-{app_id}"
-        session_id = "dummy_session_id" # In a real system, this would be a unique ID
-
+        # 1. Create the Command object with the results of the agent's work.
+        command = RecordFraudScreening(
+            application_id=app_id,
+            session_id=self.session_id, # Assumes session_id is stored on self
+            fraud_score=state["final_score"],
+            recommendation="REVIEW" if state["final_score"] > 0.4 else "PASS",
+            anomalies=state["anomalies"]
+        )
+        
+        # 2. Dispatch the command to the handler.
         try:
-            # We are creating a NEW screening record, so we start with a fresh aggregate
-            screening = FraudScreening()
-            screening.stream_id = stream_id
-
-            # 1. Initiate the screening
-            screening.initiate_screening(session_id=session_id, model_version="rule_based_v1")
-
-            # 2. Record each anomaly found
-            for anomaly in state["anomalies"]:
-                screening.record_anomaly(
-                    anomaly_type=anomaly["anomaly_type"],
-                    description=anomaly["description"],
-                    severity=anomaly["severity"]
-                )
-            
-            # 3. Record the final completion event
-            recommendation = "REVIEW" if state["final_score"] > 0.4 else "PASS"
-            screening.complete_screening(
-                session_id=session_id,
-                fraud_score=state["final_score"],
-                recommendation=recommendation
-            )
-
-            # 4. Append all new events to the stream
-            if screening.has_new_events():
-                await self.event_store.append_to_stream(screening)
-                print(f"  -> {len(screening.new_events)} fraud events recorded to stream '{stream_id}'")
-
+            # The agent's job is done. It just calls the handler and trusts it to do the work.
+            await handle_record_fraud_screening(command, self.event_store)
+            print(f"  -> Successfully dispatched RecordFraudScreening command.")
         except Exception as e:
-            print(f"  -> CRITICAL ERROR: Could not save fraud results for {app_id}: {e}")
+            print(f"  -> CRITICAL ERROR: Command handler failed for {app_id}: {e}")
         
         return {}
 

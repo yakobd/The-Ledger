@@ -4,26 +4,22 @@
 import sys
 import os
 
-# Get the absolute path to the project's root directory
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# # 1. Add the Week 5 project root to the path (This is correct)
+# project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# sys.path.insert(0, project_root)
 
-# 1. Add the Week 5 project root to the path
+# # 2. Add the Week 3 project root to the path (This is the fix)
+# week3_root_path = os.path.abspath("C:/Users/Yakob/Desktop/10 Academy/Week-3/doc-intelligence-refinery")
+# sys.path.insert(0, week3_root_path)
+# # --- END OF FIX ---
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-# 2. Add the Week 5 project's 'src' directory to the path
-src_path = os.path.join(project_root, "src")
-sys.path.insert(0, src_path)
-
-# 3. Add the Week 3 project's 'src' directory to the path. THIS IS THE FIX.
-week3_src_path = os.path.abspath("C:/Users/Yakob/Desktop/10 Academy/Week-3/doc-intelligence-refinery/src/agents/extractor.py")
-sys.path.insert(0, week3_src_path)
-# --- END: FINAL, CORRECT PATH MODIFICATION ---
 
 
 # The rest of the file...
 import asyncio
 # ...
-
 
 # Now, the rest of your imports will work
 import asyncio
@@ -33,14 +29,10 @@ from dotenv import load_dotenv
 from ledger_agents.document_processing_agent import DocumentProcessingAgent, DocumentProcessingAgentState
 # ... rest of the file is unchanged
 
-import asyncio
-import os
-import uuid
-from dotenv import load_dotenv
-
 from src.event_store import EventStore
 from ledger_agents.document_processing_agent import DocumentProcessingAgent, DocumentProcessingAgentState
 from src.aggregates.document_package import DocumentPackage
+
 
 # --- Configuration ---
 # We will test with application APEX-0007, as it's one of the first in the simulation.
@@ -128,5 +120,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Import the init_db function
+    from scripts.init_db import main as init_db
 
+    # Run init_db first to guarantee a clean slate
+    print("Initializing clean database...")
+    asyncio.run(init_db())
+
+    # Now run the main agent test
+    asyncio.run(main())
