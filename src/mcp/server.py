@@ -14,7 +14,8 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, project_root)
 # ---
-
+from .errors import mcp_exception_handler
+from src.event_store import OptimisticConcurrencyError
 from src.event_store import EventStore
 
 
@@ -49,6 +50,8 @@ load_dotenv()
 app = FastAPI(title="The Ledger - MCP", version="1.0.0")
 
 app.add_exception_handler(Exception, mcp_exception_handler)
+app.add_exception_handler(ValueError, mcp_exception_handler)
+app.add_exception_handler(OptimisticConcurrencyError, mcp_exception_handler)
 # This is a "singleton" pattern to ensure we only have one EventStore instance.
 _event_store = None
 

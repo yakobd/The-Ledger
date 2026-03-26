@@ -3,6 +3,11 @@
 from pydantic import BaseModel
 from decimal import Decimal
 
+class SubmitApplication(BaseModel):
+    application_id: str
+    applicant_id: str
+
+
 class CreditAnalysisCompletedCommand(BaseModel):
     application_id: str
     agent_id: str
@@ -39,3 +44,4 @@ class RecordFraudScreening(BaseModel):
     anomalies: list[dict]
     correlation_id: str | None = None
     causation_id: str | None = None
+

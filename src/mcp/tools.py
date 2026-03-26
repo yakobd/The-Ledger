@@ -45,3 +45,4 @@ async def tool_record_fraud_screening(
     await handle_record_fraud_screening(cmd, event_store)
     return {"status": "accepted", "application_id": cmd.application_id}
 
+

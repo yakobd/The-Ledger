@@ -1,59 +1,58 @@
-import asyncio
+# tests/test_concurrency.py
+
 import pytest
-from uuid import uuid4
+import asyncio
+import uuid
 from src.event_store import EventStore, OptimisticConcurrencyError
 
-@pytest.mark.asyncio
-async def test_concurrent_double_append_exactly_one_succeeds():
-    store = EventStore("postgresql://postgres:apex@localhost/apex_ledger")
-    await store.connect()
+pytestmark = pytest.mark.asyncio
 
-    # Use a unique stream ID every test run → no version drift
-    stream_id = f"loan-test-{uuid4()}"
+async def test_double_decision_concurrency(event_store: EventStore):
+    """
+    The double-decision test as specified in the Phase 1 rubric.
+    Two tasks attempt to append with expected_version=1. Exactly one must succeed.
+    """
+    stream_id = f"loan-double-decision-{uuid.uuid4()}"
     
-    # Create the stream with initial event
-    await store.append(
+    # Setup: Create a stream with one event, so its version is 1.
+    await event_store.append(
         stream_id=stream_id,
-        events=[{
-            "event_type": "ApplicationSubmitted",
-            "event_version": 0,
-            "payload": {"application_id": "test-app"}
-        }],
-        expected_version=-1
+        events=[{"event_type": "ApplicationSubmitted", "payload": {}, "event_version": 1}],
+        expected_version=0
     )
     
-    current_version = await store.stream_version(stream_id)
+    # Both tasks will read the stream at version 1.
+    read_version = 1
     
-    async def task(task_id: int):
+    async def attempt_append(task_id: int):
         try:
-            event = {
-                "event_type": "CreditAnalysisCompleted",
-                "event_version": 1,
-                "payload": {"application_id": "test-app"}
-            }
-            positions = await store.append(
+            # Both tasks try to write, expecting the version to still be 1.
+            await event_store.append(
                 stream_id=stream_id,
-                events=[event],
-                expected_version=current_version,
-                correlation_id=f"task-{task_id}",
-                causation_id="test-run"
+                events=[{"event_type": "CreditAnalysisCompleted", "payload": {"task_id": task_id}, "event_version": 1}],
+                expected_version=read_version
             )
-            print(f"✅ Task {task_id} SUCCEEDED → position {positions[0]}")
-            return True
-        except OptimisticConcurrencyError:
-            print(f"❌ Task {task_id} FAILED with OptimisticConcurrencyError (as expected)")
-            return False
-        except Exception as e:
-            print(f"❌ Task {task_id} unexpected error: {e}")
-            return False
+            return "SUCCESS"
+        except OptimisticConcurrencyError as e:
+            # Assert that the error has the correct context
+            assert e.expected_version == read_version
+            assert e.actual_version > read_version
+            return "OCC_FAILURE"
 
-    t1 = asyncio.create_task(task(1))
-    t2 = asyncio.create_task(task(2))
+    # Run both tasks concurrently
+    results = await asyncio.gather(attempt_append(1), attempt_append(2))
     
-    results = await asyncio.gather(t1, t2)
+    # Assertions
+    assert results.count("SUCCESS") == 1, "Exactly one task must succeed"
+    assert results.count("OCC_FAILURE") == 1, "Exactly one task must fail with OCC"
     
-    success_count = sum(results)
-    assert success_count == 1, f"Exactly ONE task must succeed (got {success_count})"
-    assert not all(results), "The other task must raise OptimisticConcurrencyError"
-    
-    await store.close()
+    # Final check on the database state
+    async with event_store._pool.acquire() as conn:
+        # (a) Assert total events appended = 2 (not 3)
+        final_count = await conn.fetchval("SELECT COUNT(*) FROM events WHERE stream_id = $1", stream_id)
+        assert final_count == 2, "Stream should have exactly 2 events total"
+        
+        # (b) Assert the winning task's event has stream_position=2
+        winning_event = await conn.fetchrow("SELECT stream_position FROM events WHERE stream_id = $1 AND stream_position = 2", stream_id)
+        assert winning_event is not None, "The winning event should be at position 2"
+

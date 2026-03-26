@@ -108,6 +108,7 @@ class LoanApplicationAggregate:
     term: int, 
     approved_by: str
     ):
+        self.assert_is_pending_decision()
     # Business Rule #5: Compliance Dependency
         if compliance_verdict != "CLEAR":
             raise DomainError(f"Cannot approve application. Compliance check failed with verdict: {compliance_verdict}")
@@ -131,9 +132,9 @@ class LoanApplicationAggregate:
 
     def decline_application(self, reasons: list[str], declined_by: str):
         # self.assert_can_be_approved() # Optional guard clause
-        
+        self.assert_is_pending_decision()
         from src.models.events import ApplicationDeclined
-        
+        if self.state in ["APPROVED", "DECLINED"]: ...
         return ApplicationDeclined(
             application_id=self.application_id,
             decline_reasons=reasons,
@@ -170,3 +171,33 @@ class LoanApplicationAggregate:
             generated_at=self._now()
         )
 
+    def assert_state_is(self, expected_state: ApplicationState):
+        """Generic guard to check for a specific state."""
+        if self.state != expected_state:
+            raise DomainError(f"Invalid state: Expected {expected_state.value} but was {self.state.value}")
+
+    def assert_is_pending_decision(self):
+        """Checks if all analyses are complete."""
+        # This is a more explicit version of your `assert_awaiting_decision`
+        required_states = {
+            ApplicationState.CREDIT_COMPLETED,
+            ApplicationState.FRAUD_COMPLETED,
+            ApplicationState.COMPLIANCE_COMPLETED,
+        }
+        # This logic is complex. For now, we will just check if we are in DECISION_PENDING
+        if self.state != ApplicationState.DECISION_PENDING:
+             raise DomainError(f"Not all analyses are complete. Current state: {self.state.value}")
+
+    def assert_is_pending_decision(self):
+        """
+        Business Rule: A final decision can only be made after all specialist
+        agents have completed their work.
+        """
+        # This is a simplified check. A more complex check would look at the
+        # state of all required analyses. For now, we ensure the state was
+        # explicitly moved to DECISION_PENDING by a previous event handler.
+        if self.state != ApplicationState.DECISION_PENDING:
+             raise DomainError(
+                 f"Invalid state transition. Cannot make a final decision. "
+                 f"Application is in state '{self.state.value}', but must be 'DECISION_PENDING'."
+             )

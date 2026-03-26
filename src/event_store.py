@@ -123,53 +123,69 @@ class EventStore:
                     stream_id.split('-')[0], # Extract aggregate type from stream_id
                     new_version
                 )
+
+                # 5. Write to the outbox table in the same transaction
+                print(f"  -> Writing {len(new_event_ids)} event(s) to outbox...")
+                for event_id, event_dict in zip(new_event_ids, events):
+                    await conn.execute(
+                        """
+                        INSERT INTO outbox (event_id, destination, payload)
+                        VALUES ($1, 'downstream_topic', $2)
+                        """,
+                        event_id,
+                        json.dumps(event_dict["payload"])
+                )
                 
                 return new_event_ids
 
 
     #Phase-1 Step-3: Updated the load_stream() method that was given on the starter code
-    async def load_stream(self, stream_id: str) -> list[StoredEvent]:
+    # In src/event_store.py
+
+# Replace the existing load_stream method with this one:
+    async def load_stream(
+        self, 
+        stream_id: str,
+        from_position: int = 0,
+        to_position: int | None = None
+    ) -> list[StoredEvent]:
         """
-        Loads all events for a given stream, upcasting them to the latest version.
+        Loads events for a given stream, supporting slicing with from_position
+        and to_position, and upcasting them to the latest version.
         """
+        # --- THIS IS THE NEW LOGIC ---
+        # We build the query and its arguments dynamically based on the parameters
+        
+        query = """
+            SELECT event_id, stream_id, stream_position, event_type,
+                event_version, payload, metadata, recorded_at, global_position
+            FROM events 
+            WHERE stream_id = $1 AND stream_position > $2
+        """
+        params = [stream_id, from_position]
+        
+        if to_position is not None:
+            query += f" AND stream_position <= ${len(params) + 1}"
+            params.append(to_position)
+            
+        query += " ORDER BY stream_position ASC"
+        # --- END OF NEW LOGIC ---
+
         async with self._pool.acquire() as conn:
-            # --- THIS IS THE FIX ---
-            # The full, correct SQL query is here.
-            rows = await conn.fetch(
-                """
-                SELECT event_id, stream_id, stream_position, event_type,
-                    event_version, payload, metadata, recorded_at, global_position
-                FROM events 
-                WHERE stream_id = $1
-                ORDER BY stream_position ASC
-                """,
-                stream_id
-            )
-            # --- END OF FIX ---
+            rows = await conn.fetch(query, *params)
             
             events = []
             for row in rows:
+                # The upcasting logic here is already correct
                 payload_dict = json.loads(row["payload"]) if isinstance(row["payload"], str) else (row["payload"] or {})
-                
-                print(f"--- DEBUG: Processing Event ---")
-                print(f"  - Event Type: {row['event_type']}")
-                print(f"  - Original DB Version: {row['event_version']}")
-                print(f"  - Original Payload: {payload_dict}")
-
                 upcasted_payload = event_registry.upcast(row["event_type"], payload_dict)
-                
-                print(f"  - Upcasted Payload: {upcasted_payload}")
-
-                # Determine the final version from the upcasted payload, falling back to the row's version
-                final_version = upcasted_payload.get("event_version", row["event_version"])
-                print(f"  - Final Version determined: {final_version}")
                 
                 event = StoredEvent(
                     event_id=row["event_id"],
                     stream_id=row["stream_id"],
                     stream_position=row["stream_position"],
                     event_type=row["event_type"],
-                    event_version=final_version,
+                    event_version=upcasted_payload.get("event_version", row["event_version"]),
                     payload=upcasted_payload,
                     metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else (row["metadata"] or {}),
                     recorded_at=row["recorded_at"],
@@ -177,6 +193,7 @@ class EventStore:
                 )
                 events.append(event)
             return events
+
 
     #Phase-1 Step-4: Updated the load_all() method that was given on the starter code
     async def load_all(
