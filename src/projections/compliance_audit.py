@@ -68,3 +68,28 @@ class ComplianceAuditProjector(BaseProjector):
         
         except Exception as e:
             print(f"  -> CRITICAL ERROR in ComplianceProjector for {app_id}: {e}")
+
+async def get_compliance_at(
+    conn: asyncpg.Connection, 
+    application_id: str, 
+    timestamp: datetime
+) -> dict | None:
+    """
+    Performs a temporal query to get the state of the compliance record
+    as it existed at a specific point in time.
+    """
+    print(f"--- Performing temporal query for {application_id} at {timestamp.isoformat()} ---")
+    
+    # This query finds the latest version of the record *before* the given timestamp
+    row = await conn.fetchrow(
+        """
+        SELECT * FROM compliance_audit_view
+        WHERE application_id = $1 AND updated_at <= $2
+        ORDER BY version DESC
+        LIMIT 1
+        """,
+        application_id,
+        timestamp
+    )
+    
+    return dict(row) if row else None

@@ -4,6 +4,10 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Depends
 from dotenv import load_dotenv
 import os
+from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from fastapi import Request
+
 
 # --- Path Setup ---
 import sys
@@ -13,12 +17,38 @@ sys.path.insert(0, project_root)
 
 from src.event_store import EventStore
 
+
+
+class McpErrorDetail(BaseModel):
+    error_type: str
+    message: str
+    suggested_action: str | None = None
+    context: dict = Field(default_factory=dict)
+
+async def mcp_exception_handler(request: Request, exc: Exception):
+    # For our own ValueErrors (which aggregates raise), create a specific error
+    if isinstance(exc, ValueError):
+        error_detail = McpErrorDetail(
+            error_type="PreconditionFailed",
+            message=str(exc),
+            suggested_action="Review agent logic and preconditions for this tool."
+        )
+        return JSONResponse(status_code=400, content=error_detail.model_dump())
+    
+    # For all other unexpected errors, return a generic 500
+    error_detail = McpErrorDetail(
+        error_type="InternalServerError",
+        message="An unexpected internal error occurred.",
+        context={"detail": str(exc)}
+    )
+    return JSONResponse(status_code=500, content=error_detail.model_dump())
+# --- End of Error Handling Code ---
+# --- THIS IS THE NEW PATTERN: DEPENDENCY INJECTION ---
 # --- App Initialization ---
 load_dotenv()
 app = FastAPI(title="The Ledger - MCP", version="1.0.0")
 
-# --- THIS IS THE NEW PATTERN: DEPENDENCY INJECTION ---
-
+app.add_exception_handler(Exception, mcp_exception_handler)
 # This is a "singleton" pattern to ensure we only have one EventStore instance.
 _event_store = None
 
@@ -83,6 +113,36 @@ async def get_application_history(
         print(f"  -> ERROR fetching history for {application_id}: {e}")
         raise HTTPException(status_code=500, detail="An error occurred.")
     
+
+class McpErrorDetail(BaseModel):
+    error_type: str
+    message: str
+    suggested_action: str | None = None
+    context: dict = Field(default_factory=dict)
+
+
+
+async def mcp_exception_handler(request: Request, exc: Exception):
+    # For our own ValueErrors (which our aggregates raise), we can make a nice error
+    if isinstance(exc, ValueError):
+        error_detail = McpErrorDetail(
+            error_type="PreconditionFailed",
+            message=str(exc),
+            suggested_action="Review agent logic and preconditions for this tool."
+        )
+        return JSONResponse(status_code=400, content=error_detail.model_dump())
+    
+    # For all other unexpected errors
+    error_detail = McpErrorDetail(
+        error_type="InternalServerError",
+        message="An unexpected internal error occurred.",
+        context={"detail": str(exc)}
+    )
+    return JSONResponse(status_code=500, content=error_detail.model_dump())
+
+# Now, in your main app creation, add the handler
+# app = FastAPI(...)
+# app.add_exception_handler(Exception, mcp_exception_handler)
 
 from . import tools
 from . import resources

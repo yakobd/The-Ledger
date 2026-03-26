@@ -6,6 +6,7 @@ from typing import Type
 
 import asyncpg
 
+from datetime import datetime, timezone
 from src.event_store import EventStore
 from src.models.events import StoredEvent, BaseEvent, event_registry
 from src.projections.base import BaseProjector
@@ -30,6 +31,8 @@ class ProjectionDaemon:
         self.event_store = event_store
         # This dictionary maps an event type name to a list of projector classes
         self._projector_map: dict[str, list[Type[BaseProjector]]] = {}
+        # A dictionary to store the lag for each projection
+        self.projection_lags: dict[str, float] = {}
 
     async def register_projectors(self):
         """
@@ -135,23 +138,27 @@ class ProjectionDaemon:
     # In src/projections/daemon.py, replace the whole _process_batch method:
 
     async def _process_batch(self, conn: asyncpg.Connection):
-        """The core logic of the daemon when it is the leader."""
         last_processed_position = await self._get_last_checkpoint(conn)
         
-        # --- THIS IS THE FIX ---
-        # We create an empty list to hold the events from the generator
-        events = []
-        # We correctly call your `load_all` with the right parameter name
-        # and loop over the async iterator it returns.
-        async for event in self.event_store.load_all(from_global_position=last_processed_position, batch_size=100):
-            events.append(event)
-        # --- END OF FIX ---
+        events = await self.event_store.load_all(after_global_position=last_processed_position, batch_size=100)
 
         if not events:
             logger.debug("No new events to project.")
             return
 
         logger.info(f"Projecting {len(events)} new events...")
+
+        # --- THIS IS THE CHANGE ---
+        # Calculate lag before processing
+        latest_event_time = events[-1].recorded_at
+        current_time = datetime.now(timezone.utc)
+        lag = (current_time - latest_event_time).total_seconds()
+        # For a simple approach, we'll assign the same lag to all projectors
+        for proj_class in self._projector_map.values():
+            for p in proj_class: # This is a list
+                self.projection_lags[p.__name__] = lag
+
+        logger.info(f"  -> Current Projection Lag: {lag:.2f} seconds")
 
         for stored_event in events:
             # The rest of the method is unchanged and correct...
@@ -199,3 +206,6 @@ class ProjectionDaemon:
             position,
         )
 
+    def get_lag(self, projector_name: str) -> float | None:
+        """Public API to get the last calculated lag for a specific projector."""
+        return self.projection_lags.get(projector_name)

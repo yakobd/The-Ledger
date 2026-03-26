@@ -1,7 +1,7 @@
 # src/integrity/gas_town.py
 
 import json
-from typing import NamedTuple
+from typing import NamedTuple, List
 
 from src.event_store import EventStore
 
@@ -9,7 +9,8 @@ from src.event_store import EventStore
 class AgentContext(NamedTuple):
     context_text: str
     last_event_position: int
-    session_health_status: str # e.g., "HEALTHY", "NEEDS_RECONCILIATION"
+    session_health_status: str
+    pending_work: List[str] # e.g., "HEALTHY", "NEEDS_RECONCILIATION"
 
 async def reconstruct_agent_context(
     store: EventStore,
@@ -35,9 +36,23 @@ async def reconstruct_agent_context(
     
     # Check for partial completion (a critical Gas Town requirement)
     # A simple check: if the last event isn't `AgentSessionCompleted`, something is wrong.
+    # Identify pending work by looking at the last event
+    pending_work = []
     if last_event.event_type != "AgentSessionCompleted":
         session_health = "NEEDS_RECONCILIATION"
-        print("  -> WARNING: Session did not complete cleanly. Reconciliation needed.")
+        print("  -> WARNING: Session did not complete cleanly.")
+        
+        # Determine next logical step based on last event
+        if last_event.event_type == "AgentSessionStarted":
+            pending_work.append("EXECUTE_FIRST_NODE")
+        elif last_event.event_type == "AgentNodeExecuted":
+            # If a node just ran, the next step is to run the *next* node
+            last_node = last_event.payload.get("node_name", "unknown")
+            pending_work.append(f"EXECUTE_NODE_AFTER:{last_node}")
+        else:
+            pending_work.append("FINISH_WORKFLOW")
+            
+        print(f"  -> Determined pending work: {pending_work}")
     else:
         print("  -> Session completed cleanly.")
 
@@ -73,7 +88,8 @@ async def reconstruct_agent_context(
     print(f"  -> Reconstructed context with ~{int(current_tokens)} tokens.")
 
     return AgentContext(
-        context_text=final_context_text,
+        context_text="".join(context_lines),
         last_event_position=last_event_position,
-        session_health_status=session_health
+        session_health_status=session_health,
+        pending_work=pending_work # Include the new field
     )

@@ -104,25 +104,23 @@ class DecisionOrchestratorAgent:
     async def _node_execute_decision(self, state: DecisionOrchestratorState):
         app_id = state["application_id"]
         decision = state["decision"]
+        # Get the compliance output gathered in the first node
+        compliance_output = state["compliance_check_output"]
         
-        # --- THIS IS THE FINAL FIX ---
-        # Make the adapter logic even more robust.
+        # --- THIS IS THE ONLY PART YOU NEED TO ADD/REPLACE ---
+        # Robustly determine the final verdict from the LLM's response
         verdict = "UNKNOWN"
-        # 1. Check for the key the LLM used this time ("decision")
         if "decision" in decision and decision["decision"] in ["APPROVE", "DECLINE", "REVIEW"]:
             verdict = decision["decision"]
-        # 2. Check for the key the LLM used last time ("approved")
         elif decision.get("approved") is True:
             verdict = "APPROVE"
         elif decision.get("approved") is False:
             verdict = "DECLINE"
-        # 3. Check for the key we asked for in the prompt ("verdict")
         elif "verdict" in decision:
             verdict = decision["verdict"]
-        # 4. If all else fails, fall back to a safe default
         else:
-            verdict = "REVIEW"
-        # --- END OF FIX ---
+            verdict = "REVIEW" # Safe fallback
+        # --- END OF THE ADDITION ---
 
         print(f"  -> Executing final decision for {app_id}: {verdict}")
         stream_id = f"loan-{app_id}"
@@ -133,15 +131,16 @@ class DecisionOrchestratorAgent:
             
             new_event = None
             if verdict == "APPROVE":
-                # Try to get the amount from either 'max_loan_amount' or 'limit_usd'
-                amount = Decimal(decision.get("max_loan_amount") or decision.get("limit_usd") or 150000)
-                rate = float(decision.get("interest_rate", 5.5))
-                
+                # This part of your code is already correct
                 new_event = loan_app.approve_application(
-                    approved_amount=amount, interest_rate=rate, term=36,
+                    compliance_verdict=compliance_output.get("overall_verdict", "UNKNOWN"),
+                    approved_amount=Decimal(decision.get("limit_usd", 0) or decision.get("max_loan_amount", 0)),
+                    interest_rate=float(decision.get("interest_rate", 5.5)),
+                    term=36,
                     approved_by="DecisionOrchestratorAgent v1.0"
                 )
             elif verdict == "DECLINE":
+                # This part of your code is also correct
                 reasons = decision.get("reasons") or [decision.get("reason_code", "Declined by LLM analysis.")]
                 new_event = loan_app.decline_application(
                     reasons=reasons,
@@ -155,9 +154,8 @@ class DecisionOrchestratorAgent:
                     expected_version=loan_app.version
                 )
                 print(f"    - 1 final decision event recorded to stream '{stream_id}'")
-
+                
         except Exception as e:
             print(f"  -> CRITICAL ERROR: Could not execute final decision for {app_id}: {e}")
             
         return {}
-

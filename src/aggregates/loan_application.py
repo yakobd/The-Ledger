@@ -99,16 +99,25 @@ class LoanApplicationAggregate:
     # Add these two methods to the BOTTOM of your existing LoanApplicationAggregate class
 
     # --- Command Methods ---
-    def approve_application(self, approved_amount: "Decimal", interest_rate: float, term: int, approved_by: str):
-        # You can add your own guard clauses here if you wish, e.g.
-        # self.assert_can_be_approved() 
-        
-        # We need to import the specific event class to create it
+    def approve_application(
+    self,
+    # Add the new parameter
+    compliance_verdict: str, 
+    approved_amount: "Decimal", 
+    interest_rate: float, 
+    term: int, 
+    approved_by: str
+    ):
+    # Business Rule #5: Compliance Dependency
+        if compliance_verdict != "CLEAR":
+            raise DomainError(f"Cannot approve application. Compliance check failed with verdict: {compliance_verdict}")
+        print("  -> BUSINESS RULE: Compliance check is CLEAR. Proceeding with approval.")
+
+        if self.state in ["APPROVED", "DECLINED"]:
+            raise DomainError(f"Application is already in a terminal state: {self.state}")
+            
         from src.models.events import ApplicationApproved
         
-        # Note: We are NOT calling self.record() from my previous examples.
-        # Your design seems to handle event creation outside the aggregate.
-        # For now, we will just create and return the event object.
         return ApplicationApproved(
             application_id=self.application_id,
             approved_amount_usd=approved_amount,
@@ -116,8 +125,8 @@ class LoanApplicationAggregate:
             term_months=term,
             conditions=[],
             approved_by=approved_by,
-            effective_date=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat(),
-            approved_at=__import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+            effective_date=self._now().date().isoformat(),
+            approved_at=self._now()
         )
 
     def decline_application(self, reasons: list[str], declined_by: str):
@@ -132,5 +141,32 @@ class LoanApplicationAggregate:
             adverse_action_notice_required=True,
             adverse_action_codes=[],
             declined_at=__import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        )
+
+    def generate_decision(self, orchestrator_session_id: str, recommendation: str, confidence_score: float, model_versions: dict):
+        """
+        Applies the 'Confidence Floor' business rule before generating a decision.
+        """
+        # Business Rule #4: Confidence Floor
+        final_recommendation = recommendation
+        if confidence_score < 0.6:
+            print("  -> BUSINESS RULE: Confidence score < 0.6. Overriding recommendation to REFER.")
+            final_recommendation = "REFER"
+
+        # We need to import the event class
+        from src.models.events import DecisionGenerated
+        
+        # This aggregate doesn't use self.record(), so we create and return the event
+        return DecisionGenerated(
+            application_id=self.application_id,
+            orchestrator_session_id=orchestrator_session_id,
+            recommendation=final_recommendation,
+            confidence=confidence_score,
+            # Placeholders for other fields
+            executive_summary="Decision generated based on agent synthesis.",
+            key_risks=[],
+            contributing_sessions=[],
+            model_versions=model_versions,
+            generated_at=self._now()
         )
 

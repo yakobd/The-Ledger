@@ -33,7 +33,15 @@ async def tool_record_fraud_screening(
 ):
     """
     MCP Tool for an agent to submit the results of its fraud screening.
+
+    **Precondition:** An active agent session must have been started for the
+    `session_id` provided in the command. Calling this tool without a valid,
+    started session may result in an error.
+    
+    **Error Types:**
+    - `OptimisticConcurrencyError`: Indicates a write conflict. The suggested
+      action is to reload the relevant aggregates and retry the command.
     """
     await handle_record_fraud_screening(cmd, event_store)
-    return {"status": "accepted", "message": "Fraud screening results recorded.", "application_id": cmd.application_id}
+    return {"status": "accepted", "application_id": cmd.application_id}
 
